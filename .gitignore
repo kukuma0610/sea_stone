@@ -1,0 +1,47 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*credentials*
+*secrets*
+
+# Python
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Logs and local runtime data
+*.log
+logs/
+identity.json
+
+# Build and tooling output
+build/
+dist/
+*.egg-info/
+.coverage
+htmlcov/
+
+# Virtual machines and disk images
+*.vdi
+*.vmdk
+*.vhd
+*.vhdx
+*.qcow2
+*.ova
+*.ovf
+*.iso
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
