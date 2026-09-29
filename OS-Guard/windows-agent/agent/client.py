@@ -9,8 +9,9 @@ from urllib.request import Request, urlopen
 from . import MODULE_VERSION
 from .identity import AgentIdentity
 from .inventory import collect_inventory
-from .results import WindowsCheckResult
-from .tasks import validate_check_task
+from .results import WindowsCheckResult, build_check_result
+from .tasks import InvalidTask, validate_check_task
+from .windows_checks import WINDOWS_CHECKS, collect_check
 
 ENROLL_PATH = "/agent-api/v2/enrollments"
 HEARTBEAT_PATH = "/agent-api/v2/heartbeat"
@@ -36,6 +37,11 @@ class HttpsTransport:
         self.timeout = timeout
 
     def post(self, path: str, payload: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
+        if path.startswith("/agent-api/v2/tasks/") and path.endswith("/results"):
+            if payload.get("auto_stage_state") == "MOCK_ONLY":
+                raise ValueError("MOCK_ONLY results cannot be sent to the real API")
+            if payload.get("server_id") == "srv-win-mock" or payload.get("criteria_snapshot_id") == "criteria-win-mock":
+                raise ValueError("mock identifiers cannot be sent to the real API")
         request = Request(
             f"{self.base_url}{path}",
             data=json.dumps(payload).encode("utf-8"),
@@ -105,6 +111,22 @@ class AgentClient:
             result.to_payload(),
             self._auth_headers(),
         )
+
+    def claim_execute_submit_checks(self, api: Any | None = None) -> list[dict[str, Any]]:
+        task = self.claim_check()
+        if task is None:
+            return []
+        required_ids = ("server_id", "job_id", "scan_run_id", "attempt_id", "criteria_snapshot_id")
+        missing_ids = [name for name in required_ids if not isinstance(task.get(name), str) or not task[name].strip()]
+        if missing_ids:
+            raise InvalidTask(f"CHECK task is missing required identifiers: {', '.join(missing_ids)}")
+        item_ids = list(WINDOWS_CHECKS) if task["scan_scope"] == "FULL" else task["item_ids"]
+        responses: list[dict[str, Any]] = []
+        for item_id in item_ids:
+            observation = collect_check(item_id, api)
+            result = build_check_result(self.identity, task, observation)
+            responses.append(self.submit_check_result(result))
+        return responses
 
     def _post(self, path: str, payload: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
         try:

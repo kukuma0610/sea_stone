@@ -101,3 +101,22 @@ def build_mock_check_result(identity: Any, task: dict[str, Any]) -> WindowsCheck
         current_value={"mock": True, "checked": False},
     )
 
+
+def build_check_result(identity: Any, task: dict[str, Any], observation: Any) -> WindowsCheckResult:
+    """Map a read-only collector observation to the existing result envelope."""
+    current_value = dict(observation.current_value)
+    current_value["manual_review_required"] = bool(observation.manual_review_required)
+    return WindowsCheckResult(
+        agent_id=identity.agent_id,
+        server_id=str(task["server_id"]),
+        job_id=str(task["job_id"]),
+        scan_run_id=str(task["scan_run_id"]),
+        attempt_id=str(task["attempt_id"]),
+        item_id=observation.item_id,
+        criteria_snapshot_id=str(task["criteria_snapshot_id"]),
+        status=observation.status,
+        reason_code=observation.reason_code,
+        observed_at=observation.observed_at,
+        current_value=current_value,
+        error={"error_reason": observation.error_reason} if observation.error_reason else None,
+    )

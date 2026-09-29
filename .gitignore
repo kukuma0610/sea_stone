@@ -22,6 +22,7 @@ __pycache__/
 *.log
 logs/
 identity.json
+OS-Guard/windows-agent/results/
 
 # Build and tooling output
 build/
