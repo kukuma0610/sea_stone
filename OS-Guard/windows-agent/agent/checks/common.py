@@ -165,23 +165,24 @@ class WindowsApiUnavailable(RuntimeError):
     pass
 
 
-class _UserInfo23(ctypes.Structure):
+class _UserInfo3(ctypes.Structure):
     _fields_ = [
         ("name", wintypes.LPWSTR), ("password", wintypes.LPWSTR), ("password_age", wintypes.DWORD),
         ("priv", wintypes.DWORD), ("home_dir", wintypes.LPWSTR), ("comment", wintypes.LPWSTR),
         ("flags", wintypes.DWORD), ("script_path", wintypes.LPWSTR), ("auth_flags", wintypes.DWORD),
-        ("full_name", wintypes.LPWSTR), ("parms", wintypes.LPWSTR), ("workstations", wintypes.LPWSTR),
+        ("full_name", wintypes.LPWSTR), ("user_comment", wintypes.LPWSTR),
+        ("parms", wintypes.LPWSTR), ("workstations", wintypes.LPWSTR),
         ("last_logon", wintypes.DWORD), ("last_logoff", wintypes.DWORD), ("acct_expires", wintypes.DWORD),
         ("max_storage", wintypes.DWORD), ("units_per_week", wintypes.DWORD), ("logon_hours", ctypes.POINTER(wintypes.BYTE)),
         ("bad_pw_count", wintypes.DWORD), ("num_logons", wintypes.DWORD), ("logon_server", wintypes.LPWSTR),
         ("country_code", wintypes.DWORD), ("code_page", wintypes.DWORD), ("user_id", wintypes.DWORD),
         ("primary_group_id", wintypes.DWORD), ("profile", wintypes.LPWSTR), ("home_dir_drive", wintypes.LPWSTR),
-        ("password_expired", wintypes.DWORD), ("password_can_change", wintypes.DWORD), ("password_must_change", wintypes.DWORD),
+        ("password_expired", wintypes.DWORD),
     ]
 
 
 class _UserModalsInfo3(ctypes.Structure):
-    _fields_ = [("lockout_threshold", wintypes.DWORD), ("lockout_observation_window", wintypes.DWORD), ("lockout_duration", wintypes.DWORD)]
+    _fields_ = [("lockout_duration", wintypes.DWORD), ("lockout_observation_window", wintypes.DWORD), ("lockout_threshold", wintypes.DWORD)]
 
 
 class _UserModalsInfo0(ctypes.Structure):
@@ -235,12 +236,12 @@ class NativeWindowsReadOnlyApi:
         try:
             while True:
                 status = self._netapi.NetUserEnum(
-                    None, 23, 0, ctypes.byref(buffer), wintypes.DWORD(-1),
+                    None, 3, 0, ctypes.byref(buffer), wintypes.DWORD(-1),
                     ctypes.byref(entries_read), ctypes.byref(total_entries), ctypes.byref(resume),
                 )
                 if status not in (0, 234):
                     raise WindowsApiUnavailable(f"NetUserEnum failed: {status}")
-                rows = ctypes.cast(buffer, ctypes.POINTER(_UserInfo23))
+                rows = ctypes.cast(buffer, ctypes.POINTER(_UserInfo3))
                 for i in range(entries_read.value):
                     row = rows[i]
                     result.append({"name": row.name or "", "user_id": row.user_id, "disabled": bool(row.flags & 0x2)})
