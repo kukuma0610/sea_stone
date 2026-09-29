@@ -1,0 +1,32 @@
+"""W-33 read-only CHECK implementation."""
+
+import re
+
+from typing import Any
+
+from .common import (
+    CheckObservation,
+    NativeWindowsReadOnlyApi,
+    WindowsApiUnavailable,
+    _mask_account_name,
+    _mask_identifier,
+    _result,
+    _seconds_to_days,
+    _seconds_to_minutes,
+)
+
+CHECK_ID = "W-33"
+
+
+def check(api: Any | None = None) -> CheckObservation:
+    item_id = CHECK_ID
+    try:
+        api = api or NativeWindowsReadOnlyApi()
+        services = api.banner_service_inventory()
+        running = [service for service in services if service['status'].lower() == 'running']
+        if not running:
+            return _result(item_id, 'PASS', 'KISA_W33_SERVICES_NOT_RUNNING', {'running_service_count': 0})
+        return _result(item_id, 'UNABLE', 'BANNER_EXPOSURE_REQUIRES_MANUAL_REVIEW', {'running_service_count': len(running), 'running_services': [service['name'] for service in running]}, manual_review_required=True)
+    except (WindowsApiUnavailable, OSError, KeyError, TypeError, ValueError) as exc:
+        return _result(item_id, 'UNABLE', 'WINDOWS_API_UNAVAILABLE', {}, manual_review_required=True, error_reason=str(exc))
+    return _result(item_id, "UNABLE", "CHECK_CRITERIA_NOT_DOCUMENTED", {})
