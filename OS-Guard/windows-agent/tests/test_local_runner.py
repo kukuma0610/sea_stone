@@ -1,8 +1,10 @@
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 
-from agent.local_runner import CHECK_IDS, run_checks, save_report
+from agent.local_runner import CHECK_IDS, CHECK_TITLES, print_report, run_checks, save_report
 from agent.windows_checks import CheckObservation
 
 
@@ -31,6 +33,38 @@ class LocalRunnerTests(unittest.TestCase):
         self.assertIn("RuntimeError", report["checks"][1]["error_reason"])
         self.assertEqual(report["checks"][-1]["item_id"], "W-64")
         self.assertEqual(report["checks"][-1]["status"], "PASS")
+
+    def test_console_output_is_compact_and_does_not_change_report(self):
+        statuses = {"W-01": "PASS", "W-02": "FAIL", "W-03": "UNABLE", "W-04": "NA"}
+
+        def collector(item_id, api):
+            status = statuses.get(item_id, "PASS")
+            return CheckObservation(
+                item_id, status, "SHORT_REASON", {"secret_evidence": "must-not-print"},
+                error_reason="collection failed" if status == "UNABLE" else None,
+            )
+
+        report = run_checks(
+            api=object(), collector=collector,
+            system_info={"os": "Windows", "release": "Server 2022", "windows_build": "20348", "administrator": True},
+        )
+        original = repr(report)
+        output = StringIO()
+        with redirect_stdout(output):
+            print_report(report, Path("results/windows-check.json"))
+        rendered = output.getvalue()
+
+        self.assertEqual(len(CHECK_TITLES), 64)
+        self.assertIn("OS: Windows Server 2022", rendered)
+        self.assertIn("Build: 20348", rendered)
+        self.assertIn("관리자: 예", rendered)
+        self.assertIn("[PASS] W-01 Administrator 계정 이름 변경 등 보안성 강화", rendered)
+        self.assertIn("[FAIL] W-02 Guest 계정 비활성화\n  사유: SHORT_REASON", rendered)
+        self.assertIn("[UNABLE] W-03 불필요한 계정 제거\n  사유: collection failed", rendered)
+        self.assertIn("[NA] W-04 계정 잠금 임계값 설정", rendered)
+        self.assertIn("PASS=61 FAIL=1 UNABLE=1 NA=1 TOTAL=64", rendered)
+        self.assertNotIn("secret_evidence", rendered)
+        self.assertEqual(repr(report), original)
 
 
 if __name__ == "__main__":
