@@ -803,9 +803,10 @@ ConvertTo-Json -InputObject $data -Compress
         }
 
     def shutdown_without_logon(self) -> bool | None:
-        return self._read_optional_registry_bool(
-            r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon", "ShutdownWithoutLogon"
-        )
+        return self._required_policy_dword(
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System",
+            "ShutdownWithoutLogon", {0, 1},
+        ) == 1
 
     def remote_shutdown_principal_counts(self) -> dict[str, int]:
         entries = _parse_target_user_right(self._export_security_policy("USER_RIGHTS"), "SeRemoteShutdownPrivilege")
