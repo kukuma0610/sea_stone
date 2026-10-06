@@ -12,14 +12,22 @@ from uuid import uuid4
 from ..windows_checks import collect_check
 from .models import (
     ApprovalReceipt, HardeningMode, HardeningPlan, HardeningResult,
-    HardeningState, RegistrySnapshot, RollbackResult,
+    HardeningState, PolicySnapshot, RegistrySnapshot, RollbackResult,
 )
-from .registry import get_action
+from .registry import SEMI_AUTO_ALLOWLIST, get_action
 from .snapshots import SnapshotError, SnapshotStore
+from .policy_actions import PolicyPreconditionError, PolicyTransactionAction
 
 
 class HardeningRejected(RuntimeError):
     pass
+
+
+def _validate_semi_auto_plan(plan):
+    if (plan.mode is not HardeningMode.SEMI_AUTO or plan.code not in SEMI_AUTO_ALLOWLIST
+            or plan.current_status != "FAIL" or plan.approval_required is not True
+            or plan.manual_required is not False):
+        raise HardeningRejected("only an allowlisted FAIL SEMI_AUTO plan can execute")
 
 
 class ApprovalGate:
@@ -29,12 +37,14 @@ class ApprovalGate:
         self._receipts: dict[str, ApprovalReceipt] = {}
 
     def request(self, plan: HardeningPlan) -> HardeningPlan:
+        _validate_semi_auto_plan(plan)
         if plan.mode is not HardeningMode.SEMI_AUTO or plan.state is not HardeningState.PLANNED:
             raise HardeningRejected("only a planned SEMI_AUTO action can request approval")
         return replace(plan, state=HardeningState.WAITING_APPROVAL)
 
     def approve(self, plan: HardeningPlan, *, approved: bool) -> tuple[HardeningPlan, ApprovalReceipt]:
-        if not approved:
+        _validate_semi_auto_plan(plan)
+        if approved is not True:
             raise HardeningRejected("explicit approval was not granted")
         if plan.state is not HardeningState.WAITING_APPROVAL:
             raise HardeningRejected("plan is not waiting for approval")
@@ -76,9 +86,10 @@ class HardeningRunner:
         self._snapshot_store = snapshot_store or SnapshotStore()
 
     def run(self, plan: HardeningPlan, receipt: ApprovalReceipt) -> HardeningResult:
+        _validate_semi_auto_plan(plan)
         if plan.mode is HardeningMode.MANUAL or plan.manual_required:
             raise HardeningRejected("MANUAL plans provide guidance and cannot change the system")
-        if plan.state is not HardeningState.APPROVED or not plan.approved:
+        if plan.state is not HardeningState.APPROVED or plan.approved is not True:
             raise HardeningRejected("hardening requires an approved plan")
         if not self._administrator_check():
             raise HardeningRejected("administrator privileges are required")
@@ -91,18 +102,24 @@ class HardeningRunner:
         )
         before_action: dict[str, Any] = {}
         before_check: dict[str, Any] = {}
-        snapshot: RegistrySnapshot | None = None
+        snapshot: RegistrySnapshot | PolicySnapshot | None = None
         try:
             before_observation = self._checker(plan.code, self._api)
             before_check = asdict(before_observation)
             if before_check["status"] != "FAIL":
                 raise HardeningRejected("current CHECK result is no longer FAIL")
+            if isinstance(action, PolicyTransactionAction):
+                action.preflight()
             before_action = action.capture()
-            snapshot = self._snapshot_store.create(
+            save = self._snapshot_store.create_transaction if isinstance(action, PolicyTransactionAction) else self._snapshot_store.create
+            snapshot = save(
                 code=plan.code, plan_id=plan.plan_id, path=action.path,
                 value_name=action.name, captured=before_action,
             )
-            action.apply()
+            if isinstance(action, PolicyTransactionAction):
+                action.apply(before_action)
+            else:
+                action.apply()
             after_action = action.capture()
             after_observation = self._checker(plan.code, self._api)
             after_check = asdict(after_observation)
@@ -119,7 +136,7 @@ class HardeningRunner:
             )
         except Exception as exc:
             rollback = None
-            if snapshot is not None:
+            if snapshot is not None and not isinstance(exc, PolicyPreconditionError):
                 rollback = self._perform_rollback(snapshot, action)
             return HardeningResult(
                 plan_id=plan.plan_id, code=plan.code, state=HardeningState.FAILED,
@@ -143,9 +160,11 @@ class HardeningRunner:
         if self._snapshot_store.has_successful_rollback(snapshot_id):
             raise HardeningRejected("snapshot has already been rolled back")
         action = get_action(code)
+        if isinstance(action, PolicyTransactionAction):
+            action.preflight()
         return self._perform_rollback(snapshot, action)
 
-    def _perform_rollback(self, snapshot: RegistrySnapshot, action: Any) -> RollbackResult:
+    def _perform_rollback(self, snapshot: RegistrySnapshot | PolicySnapshot, action: Any) -> RollbackResult:
         if action.code != snapshot.code or action.path != snapshot.registry_path or action.name != snapshot.value_name:
             raise HardeningRejected("snapshot registry target does not match the allowlisted action")
         restored = None
@@ -155,6 +174,11 @@ class HardeningRunner:
         try:
             action.restore(asdict(snapshot))
             restored = action.capture()
+            expected = ({"targets": snapshot.targets} if isinstance(snapshot, PolicySnapshot) else
+                        {"exists": snapshot.existed, "value": snapshot.previous_value,
+                         "registry_type": snapshot.value_type})
+            if restored != expected:
+                raise HardeningRejected("rollback did not restore the original values and types")
             check_result = asdict(self._checker(snapshot.code, self._api))
             success = True
         except Exception as exc:

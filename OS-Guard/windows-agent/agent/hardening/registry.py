@@ -5,6 +5,7 @@ from __future__ import annotations
 from types import MappingProxyType
 
 from .actions import HardeningAction, RegistryValueAction
+from .policy_actions import new_actions
 
 
 _LSA = r"SYSTEM\CurrentControlSet\Control\Lsa"
@@ -25,6 +26,7 @@ _ACTIONS: dict[str, HardeningAction] = {
     "W-59": RegistryValueAction("W-59", _LSA, "LmCompatibilityLevel", 3, "DWORD"),
 }
 
+_ACTIONS.update(new_actions())
 ACTION_REGISTRY = MappingProxyType(_ACTIONS)
 SEMI_AUTO_ALLOWLIST = frozenset(_ACTIONS)
 

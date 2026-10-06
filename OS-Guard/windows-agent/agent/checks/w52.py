@@ -18,14 +18,23 @@ from .common import (
 CHECK_ID = "W-52"
 
 
+# `Autologon 기능 제어` 항목을 읽기 전용으로 점검한다. KISA 기준은 “AutoAdminLogon 값 없음 또는 0이면 양호, 1이면 취약 (KISA 원문 p.253)”이다.
 def check(api: Any | None = None) -> CheckObservation:
     item_id = CHECK_ID
     try:
+        # 테스트에서 전달한 수집기가 없으면 실제 Windows 읽기 전용 수집기를 준비한다.
         api = api or NativeWindowsReadOnlyApi()
+        # 공통 수집기의 `auto_admin_logon()`로 이 항목에 필요한 Windows 정보를 읽어 `value`에 저장한다.
         value = api.auto_admin_logon()
+        # `value not in {0, 1}` 조건으로 값 부재 또는 지원되지 않는 값을 구분해 오판정을 막는다.
         if value not in {0, 1}:
+            # 필요한 값이나 자동판정 근거가 부족하므로 추측하지 않고 UNABLE을 반환한다. 수동 검토 여부와 오류 사유도 결과에 보존한다.
             return _result(item_id, 'UNABLE', 'AUTO_ADMIN_LOGON_VALUE_UNRECOGNIZED', {'auto_admin_logon': value}, manual_review_required=True)
+        # 이 분기에서는 KISA 취약 조건이 확인되었으므로 FAIL을 반환하며, 함께 전달한 값은 판정 증적이다.
         return _result(item_id, 'FAIL' if value == 1 else 'PASS', 'KISA_W52_AUTO_ADMIN_LOGON', {'auto_admin_logon': value})
+    # Windows API 호출, 권한, 자료형 또는 필수 키 오류가 나면 정확한 판정이 불가능하므로 이 항목만 UNABLE로 처리한다.
     except (WindowsApiUnavailable, OSError, KeyError, TypeError, ValueError) as exc:
+        # 필요한 값이나 자동판정 근거가 부족하므로 추측하지 않고 UNABLE을 반환한다. 수동 검토 여부와 오류 사유도 결과에 보존한다.
         return _result(item_id, 'UNABLE', 'WINDOWS_API_UNAVAILABLE', {}, manual_review_required=True, error_reason=str(exc))
+    # 필요한 값이나 자동판정 근거가 부족하므로 추측하지 않고 UNABLE을 반환한다. 수동 검토 여부와 오류 사유도 결과에 보존한다.
     return _result(item_id, "UNABLE", "CHECK_CRITERIA_NOT_DOCUMENTED", {})

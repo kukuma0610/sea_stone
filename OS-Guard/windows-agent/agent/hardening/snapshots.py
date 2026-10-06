@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID, uuid4
 
-from .models import RegistrySnapshot, RollbackResult
+from .models import PolicySnapshot, RegistrySnapshot, RollbackResult
 
 
 class SnapshotError(RuntimeError):
@@ -37,10 +37,23 @@ class SnapshotStore:
         self._write(snapshot.snapshot_id, {**asdict(snapshot), "rollback_results": []})
         return snapshot
 
-    def load(self, snapshot_id: str) -> RegistrySnapshot:
+    def create_transaction(self, *, code, plan_id, path, value_name, captured):
+        snapshot = PolicySnapshot(
+            snapshot_id=str(uuid4()), code=code, registry_path=path,
+            value_name=value_name, targets=captured["targets"],
+            timestamp=datetime.now(timezone.utc).isoformat(), plan_id=plan_id,
+        )
+        self._write(snapshot.snapshot_id, {**asdict(snapshot), "rollback_results": []})
+        return snapshot
+
+    def load(self, snapshot_id: str) -> RegistrySnapshot | PolicySnapshot:
         data = self._read(snapshot_id)
         try:
-            return RegistrySnapshot(**{key: data[key] for key in RegistrySnapshot.__dataclass_fields__})
+            model = PolicySnapshot if "targets" in data else RegistrySnapshot
+            snapshot = model(**{key: data[key] for key in model.__dataclass_fields__})
+            if snapshot.snapshot_id != str(UUID(snapshot_id)):
+                raise ValueError("snapshot id does not match the requested file")
+            return snapshot
         except (KeyError, TypeError, ValueError) as exc:
             raise SnapshotError("snapshot format is invalid") from exc
 

@@ -73,6 +73,17 @@ class RegistrySnapshot:
 
 
 @dataclass(frozen=True)
+class PolicySnapshot:
+    snapshot_id: str
+    code: str
+    registry_path: str
+    value_name: str
+    targets: list[dict[str, Any]]
+    timestamp: str
+    plan_id: str
+
+
+@dataclass(frozen=True)
 class RollbackResult:
     snapshot_id: str
     plan_id: str

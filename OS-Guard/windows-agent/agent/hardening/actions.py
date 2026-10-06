@@ -59,6 +59,21 @@ class RegistryValueAction:
     def restore(self, snapshot: dict[str, Any]) -> None:
         import winreg
 
+        if type(snapshot.get("existed")) is not bool:
+            raise ValueError("snapshot existence flag is invalid")
+        kind, value = snapshot.get("value_type"), snapshot.get("previous_value")
+        if not snapshot["existed"]:
+            if kind is not None or value is not None:
+                raise ValueError("absent registry snapshot contains a value")
+        elif kind in (winreg.REG_SZ, winreg.REG_EXPAND_SZ):
+            if not isinstance(value, str):
+                raise ValueError("snapshot string value is invalid")
+        elif kind in (winreg.REG_DWORD, winreg.REG_QWORD):
+            maximum = 0xFFFFFFFF if kind == winreg.REG_DWORD else 0xFFFFFFFFFFFFFFFF
+            if type(value) is not int or not 0 <= value <= maximum:
+                raise ValueError("snapshot integer value is invalid")
+        else:
+            raise ValueError("snapshot registry type is unsupported")
         with winreg.CreateKeyEx(
             winreg.HKEY_LOCAL_MACHINE,
             self.path,

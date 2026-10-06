@@ -55,7 +55,8 @@ class HardeningTests(unittest.TestCase):
         self.assertEqual({mode.value for mode in HardeningMode}, {"SEMI_AUTO", "MANUAL"})
         self.assertEqual(
             SEMI_AUTO_ALLOWLIST,
-            frozenset({"W-07", "W-13", "W-15", "W-48", "W-50", "W-52", "W-53", "W-59"}),
+            frozenset({"W-04", "W-05", "W-07", "W-08", "W-09", "W-10", "W-12", "W-13", "W-15",
+                       "W-28", "W-36", "W-48", "W-49", "W-50", "W-52", "W-53", "W-55", "W-59"}),
         )
 
     def test_planner_rejects_unable_pass_and_na(self):
@@ -148,6 +149,31 @@ class HardeningTests(unittest.TestCase):
         )
         with self.assertRaises(HardeningRejected):
             runner.run(plan, object())
+
+    def test_approval_rejects_non_boolean_and_manual_disguised_plans(self):
+        gate = ApprovalGate()
+        waiting = gate.request(create_plan(self.observation()))
+        for value in (1, "true", "yes", [], None):
+            with self.subTest(value=value), self.assertRaises(HardeningRejected):
+                gate.approve(waiting, approved=value)
+        for plan in (
+            replace(waiting, mode=HardeningMode.MANUAL),
+            replace(waiting, mode="SEMI_AUTO"),
+            replace(waiting, code="W-64"),
+            replace(waiting, current_status="UNABLE"),
+            replace(waiting, approval_required=False),
+        ):
+            with self.assertRaises(HardeningRejected):
+                gate.approve(plan, approved=True)
+
+    def test_silent_restore_failure_is_not_success(self):
+        action = FakeAction()
+        runner, plan, result = self._successful_hardening(action)
+        runner._checker = lambda code, api: self.observation(status="FAIL")
+        with patch("agent.hardening.runner.get_action", return_value=action), patch.object(action, "restore"):
+            rollback = runner.rollback(code="W-07", snapshot_id=result.snapshot_id, plan_id=plan.plan_id)
+        self.assertFalse(rollback.success)
+        self.assertIn("original values", rollback.error_reason)
 
     def _successful_hardening(self, action):
         gate = ApprovalGate()
