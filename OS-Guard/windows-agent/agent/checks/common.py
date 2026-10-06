@@ -366,16 +366,20 @@ class NativeWindowsReadOnlyApi:
         return self._security_policy_flag("ClearTextPassword")
 
     def everyone_includes_anonymous(self) -> bool:
-        return self._security_policy_flag("EveryoneIncludesAnonymous")
+        return self._required_policy_dword(
+            r"SYSTEM\CurrentControlSet\Control\Lsa", "EveryoneIncludesAnonymous", {0, 1}
+        ) == 1
 
     def anonymous_sid_name_translation_enabled(self) -> bool:
         return self._security_policy_flag("LSAAnonymousNameLookup")
 
     def blank_password_use_restricted(self) -> bool:
-        return self._security_policy_flag("LimitBlankPasswordUse")
+        return self._required_policy_dword(
+            r"SYSTEM\CurrentControlSet\Control\Lsa", "LimitBlankPasswordUse", {0, 1}
+        ) == 1
 
     def local_logon_principals(self) -> list[str]:
-        entries = _parse_security_policy_list(self._export_security_policy(), "SeInteractiveLogonRight")
+        entries = _parse_target_user_right(self._export_security_policy("USER_RIGHTS"), "SeInteractiveLogonRight")
         principals: list[str] = []
         for entry in entries:
             sid = entry.removeprefix("*")
@@ -388,10 +392,27 @@ class NativeWindowsReadOnlyApi:
         return principals
 
     def strong_key_protection_level(self) -> int:
-        return _parse_registry_dword(
-            self._export_security_policy(),
-            r"MACHINE\Software\Policies\Microsoft\Cryptography\ForceKeyProtection",
+        return self._required_policy_dword(
+            r"SOFTWARE\Policies\Microsoft\Cryptography", "ForceKeyProtection", {0, 1, 2}
         )
+
+    @staticmethod
+    def _required_policy_dword(path: str, name: str, allowed: set[int]) -> int:
+        import winreg
+
+        try:
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE, path, 0,
+                winreg.KEY_READ | winreg.KEY_WOW64_64KEY,
+            ) as key:
+                value, kind = winreg.QueryValueEx(key, name)
+        except FileNotFoundError as exc:
+            raise WindowsApiUnavailable(f"{name} registry value absent; effective default not verified") from exc
+        except OSError as exc:
+            raise WindowsApiUnavailable(f"{name} registry read failed") from exc
+        if kind != winreg.REG_DWORD or value not in allowed:
+            raise WindowsApiUnavailable(f"{name} registry type or value unsupported")
+        return value
 
     def shares(self) -> list[dict[str, Any]]:
         script = """
@@ -787,7 +808,7 @@ ConvertTo-Json -InputObject $data -Compress
         )
 
     def remote_shutdown_principal_counts(self) -> dict[str, int]:
-        entries = _parse_security_policy_list(self._export_security_policy(), "SeRemoteShutdownPrivilege")
+        entries = _parse_target_user_right(self._export_security_policy("USER_RIGHTS"), "SeRemoteShutdownPrivilege")
         normalized = [entry.removeprefix("*") for entry in entries]
         return {
             "principal_count": len(normalized),
@@ -986,14 +1007,16 @@ ConvertTo-Json -InputObject $data -Compress
     def _security_policy_flag(self, policy_name: str) -> bool:
         return _parse_security_policy_flag(self._export_security_policy(), policy_name)
 
-    def _export_security_policy(self) -> str:
+    def _export_security_policy(self, area: str = "SECURITYPOLICY") -> str:
+        if area not in {"SECURITYPOLICY", "USER_RIGHTS"}:
+            raise ValueError("unsupported security policy export area")
         with tempfile.TemporaryDirectory(prefix="os-guard-policy-") as temp_dir:
             export_path = Path(temp_dir) / "security-policy.inf"
             try:
                 completed = subprocess.run(
                     [
                         "secedit.exe", "/export", "/cfg", str(export_path),
-                        "/areas", "SECURITYPOLICY", "/quiet",
+                        "/areas", area, "/quiet",
                     ],
                     check=False,
                     capture_output=True,
@@ -1055,6 +1078,19 @@ def _parse_security_policy_list(policy_text: str, policy_name: str) -> list[str]
     if not match:
         raise WindowsApiUnavailable(f"{policy_name} was not present in the exported policy")
     return [entry.strip() for entry in match.group(1).split(",") if entry.strip()]
+
+
+def _parse_target_user_right(policy_text: str, policy_name: str) -> list[str]:
+    section = ""
+    for raw_line in policy_text.splitlines():
+        line = raw_line.strip().lstrip("\ufeff")
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip().casefold()
+        elif section == "privilege rights" and "=" in line:
+            key, value = line.split("=", 1)
+            if key.strip().casefold() == policy_name.casefold():
+                return [entry.strip() for entry in value.split(",") if entry.strip()]
+    raise WindowsApiUnavailable(f"{policy_name} was not present in exported Privilege Rights")
 
 
 def _now() -> str:
