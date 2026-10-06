@@ -22,12 +22,13 @@ def check(api: Any | None = None) -> CheckObservation:
     item_id = CHECK_ID
     try:
         api = api or NativeWindowsReadOnlyApi()
-        ftp = api.ftp_inventory()
+        ftp = getattr(api, "ftp_check_inventory", api.ftp_inventory)()
         sites = ftp['sites']
         if not ftp['service_running']:
             return _result(item_id, 'PASS', 'KISA_W21_FTP_NOT_RUNNING', {'service_running': False, 'site_count': len(sites)})
         if not sites:
-            return _result(item_id, 'UNABLE', 'FTP_CONFIGURATION_NOT_FOUND', {'service_running': True}, manual_review_required=True)
+            return _result(item_id, 'UNABLE', 'FTP_CONFIGURATION_NOT_FOUND', {'service_running': True}, manual_review_required=True,
+                           error_reason="FTP service running; no FTP sites collected; encryption cannot be verified")
         insecure_count = sum((site['ssl_control_policy'].lower() != 'sslrequire' or site['ssl_data_policy'].lower() != 'sslrequire' for site in sites))
         return _result(item_id, 'FAIL' if insecure_count else 'PASS', 'KISA_W21_SECURE_FTP', {'service_running': True, 'site_count': len(sites), 'insecure_site_count': insecure_count})
     except (WindowsApiUnavailable, OSError, KeyError, TypeError, ValueError) as exc:

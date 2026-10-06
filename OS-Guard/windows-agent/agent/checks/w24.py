@@ -22,10 +22,11 @@ def check(api: Any | None = None) -> CheckObservation:
     item_id = CHECK_ID
     try:
         api = api or NativeWindowsReadOnlyApi()
-        ftp = api.ftp_inventory()
+        ftp = getattr(api, "ftp_check_inventory", api.ftp_inventory)()
         sites = ftp['sites']
         if not sites:
-            return _result(item_id, 'UNABLE', 'FTP_SITE_NOT_CONFIGURED', {'site_count': 0}, manual_review_required=True)
+            return _result(item_id, 'UNABLE', 'FTP_SITE_NOT_CONFIGURED', {'site_count': 0}, manual_review_required=True,
+                           error_reason="No FTP sites available for IP access control verification")
         unrestricted_count = sum((bool(site['ip_allow_unlisted']) or int(site['ip_allow_count']) == 0 for site in sites))
         return _result(item_id, 'FAIL' if unrestricted_count else 'PASS', 'KISA_W24_FTP_IP_RESTRICTION', {'site_count': len(sites), 'unrestricted_site_count': unrestricted_count})
     except (WindowsApiUnavailable, OSError, KeyError, TypeError, ValueError) as exc:

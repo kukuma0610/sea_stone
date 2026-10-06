@@ -470,7 +470,11 @@ ConvertTo-Json -InputObject $data -Compress
 """
         return self._run_powershell_json(script)
 
-    def ftp_inventory(self) -> dict[str, Any]:
+    def ftp_check_inventory(self) -> dict[str, Any]:
+        """Strict collection for W-21/22/24; preserve other callers' behavior."""
+        return self.ftp_inventory(strict=True)
+
+    def ftp_inventory(self, strict: bool = False) -> dict[str, Any]:
         script = """
 $service = Get-Service -Name FTPSVC -ErrorAction SilentlyContinue
 $sites = @()
@@ -509,6 +513,60 @@ $data = @([pscustomobject]@{
 })
 ConvertTo-Json -InputObject $data -Depth 5 -Compress
 """
+        if strict:
+            script = script.replace(
+                "$service = Get-Service -Name FTPSVC -ErrorAction SilentlyContinue",
+                "$ErrorActionPreference = 'Stop'\n"
+                "$stage = 'SERVICE_QUERY'\ntry {\n"
+                "$service = @(Get-Service -ErrorAction Stop | Where-Object Name -eq 'FTPSVC') | Select-Object -First 1\n"
+                "if ($null -ne $service -and $service.Status -notin @('Running','Stopped')) { throw 'SERVICE_STATE_UNRESOLVED' }\n"
+                "$stage = 'MODULE_QUERY'\n"
+                "if (-not (Get-Module -ListAvailable -Name WebAdministration)) {\n"
+                "  if ($null -eq $service) {\n"
+                "    [pscustomobject]@{service_running=$false; sites=@(); collection_state='UNUSED'; error_reason=$null} | ConvertTo-Json -Compress\n"
+                "    return\n"
+                "  }\n"
+                "  throw 'MODULE_UNAVAILABLE'\n"
+                "}\n$stage = 'FTP_QUERY'"
+            )
+            script = script.replace("Import-Module WebAdministration", "Import-Module WebAdministration -ErrorAction Stop")
+            script = script.replace(
+                "    [pscustomobject]@{\n      ssl_control_policy",
+                "    if ($null -eq $ssl.controlChannelPolicy -or $null -eq $ssl.dataChannelPolicy -or\n"
+                "        $null -eq $anonymous.Value -or $null -eq $ipSecurity.allowUnlisted) { throw 'FTP_QUERY_INCOMPLETE' }\n"
+                "    [pscustomobject]@{\n      ssl_control_policy"
+            )
+            script = script.replace(
+                "if (Test-Path -LiteralPath $physicalPath) {",
+                "if (-not (Test-Path -LiteralPath $physicalPath)) { throw 'FTP_DIRECTORY_UNAVAILABLE' }\n"
+                "    if (Test-Path -LiteralPath $physicalPath) {"
+            ).replace("catch { $false }", "catch { throw 'FTP_ACL_TRANSLATION_FAILED' }")
+            script += """
+} catch {
+  $code = if ($_.CategoryInfo.Category -eq 'PermissionDenied' -or $_.Exception -is [System.UnauthorizedAccessException]) {
+    'FTP_ACCESS_DENIED'
+  } else { 'FTP_' + $stage + '_FAILED' }
+  [pscustomobject]@{ collection_state='ERROR'; error_reason=$code } | ConvertTo-Json -Compress
+}
+"""
+            try:
+                rows = self._run_powershell_json(script)
+                if len(rows) != 1 or not isinstance(rows[0], dict):
+                    raise WindowsApiUnavailable("FTP_QUERY_INVALID_RESULT")
+                result = rows[0]
+                if result.get("collection_state") == "ERROR":
+                    raise WindowsApiUnavailable(result["error_reason"])
+                if type(result.get("service_running")) is not bool or not isinstance(result.get("sites"), list):
+                    raise WindowsApiUnavailable("FTP_QUERY_INCOMPLETE_RESULT")
+                result["collection_state"] = (
+                    "SITES_COLLECTED" if result["sites"] else
+                    "RUNNING_NO_SITES" if result["service_running"] else "UNUSED"
+                )
+                return result
+            except WindowsApiUnavailable:
+                raise
+            except (KeyError, TypeError, ValueError) as exc:
+                raise WindowsApiUnavailable("FTP_QUERY_INVALID_RESULT") from exc
         return self._run_powershell_json(script)[0]
 
     def auxiliary_share_services(self) -> list[dict[str, str]]:
@@ -784,23 +842,63 @@ ConvertTo-Json -InputObject $data -Compress
     def screen_saver_inventory(self) -> dict[str, Any]:
         import winreg
 
-        values: dict[str, str | None] = {}
-        try:
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\Desktop", 0, winreg.KEY_READ) as key:
-                for name in ("ScreenSaveActive", "ScreenSaverIsSecure", "ScreenSaveTimeOut"):
-                    try:
-                        value, _ = winreg.QueryValueEx(key, name)
-                        values[name] = str(value)
-                    except FileNotFoundError:
-                        values[name] = None
-        except OSError as exc:
-            raise WindowsApiUnavailable("screen saver settings read failed") from exc
-        timeout = int(values["ScreenSaveTimeOut"]) if values["ScreenSaveTimeOut"] and values["ScreenSaveTimeOut"].isdigit() else None
-        return {
-            "enabled": values["ScreenSaveActive"] == "1",
-            "password_protected": values["ScreenSaverIsSecure"] == "1",
-            "timeout_seconds": timeout,
+        names = {"enabled": "ScreenSaveActive", "password_protected": "ScreenSaverIsSecure",
+                 "timeout_seconds": "ScreenSaveTimeOut"}
+        locations = {
+            "machine_policy": (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Policies\Microsoft\Windows\Control Panel\Desktop"),
+            "user_policy": (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Policies\Microsoft\Windows\Control Panel\Desktop"),
+            "user_preferences": (winreg.HKEY_CURRENT_USER, r"Control Panel\Desktop"),
         }
+        sources: dict[str, Any] = {}
+        for scope, (hive, path) in locations.items():
+            sources[scope] = {}
+            for field, name in names.items():
+                entry: dict[str, Any] = {"state": "absent", "value": None}
+                try:
+                    with winreg.OpenKey(hive, path, 0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as key:
+                        value, kind = winreg.QueryValueEx(key, name)
+                    if kind != winreg.REG_SZ or not isinstance(value, str) or not value.isascii() or not value.isdecimal():
+                        raise ValueError()
+                    number = int(value)
+                    if field != "timeout_seconds" and number not in (0, 1):
+                        raise ValueError()
+                    entry = {"state": "present", "value": number if field == "timeout_seconds" else bool(number)}
+                except FileNotFoundError:
+                    pass
+                except (OSError, ValueError, TypeError):
+                    entry = {"state": "error", "value": None, "error_reason": f"{scope}:{field}:READ_FAILED"}
+                sources[scope][field] = entry
+        effective = self._screen_saver_effective_values()
+        result: dict[str, Any] = {
+            "scope": "current_user", "sources": sources, "effective": effective,
+            "effective_verified": True,
+        }
+        for field in names:
+            result[field] = effective[field]["value"]
+        return result
+
+    @staticmethod
+    def _screen_saver_effective_values() -> dict[str, Any]:
+        # SystemParametersInfo reads the calling user's live settings; no SET actions.
+        fields = {"enabled": (0x0010, wintypes.BOOL),
+                  "password_protected": (0x0076, wintypes.BOOL),
+                  "timeout_seconds": (0x000E, wintypes.UINT)}
+        result: dict[str, Any] = {}
+        try:
+            user32 = ctypes.WinDLL("user32.dll", use_last_error=True)
+            query = user32.SystemParametersInfoW
+            query.argtypes = [wintypes.UINT, wintypes.UINT, ctypes.c_void_p, wintypes.UINT]
+            query.restype = wintypes.BOOL
+        except OSError:
+            return {field: {"state": "error", "value": None, "error_reason": "USER32_UNAVAILABLE"} for field in fields}
+        for field, (action, value_type) in fields.items():
+            value = value_type()
+            if not query(action, 0, ctypes.byref(value), 0):
+                result[field] = {"state": "error", "value": None,
+                                 "error_reason": f"SPI_QUERY_FAILED:{field}:{ctypes.get_last_error()}"}
+            else:
+                result[field] = {"state": "present", "value": int(value.value) if field == "timeout_seconds" else bool(value.value)}
+        return result
 
     def shutdown_without_logon(self) -> bool | None:
         return self._required_policy_dword(
