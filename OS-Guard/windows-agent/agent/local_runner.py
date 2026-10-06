@@ -7,6 +7,7 @@ import ctypes
 import json
 import os
 import platform
+import re
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -168,6 +169,35 @@ def _console_reason(reason: Any) -> str:
         return "로컬 보안 정책을 내보내지 못했습니다."
     if "access denied" in value.lower() or "ACCESS_DENIED" in value:
         return "권한이 부족하여 설정을 확인할 수 없습니다."
+    native_error = re.fullmatch(
+        r"(NetUserEnum|NetUserModalsGet|NetLocalGroupGetMembers|NetGetJoinInformation) failed: (\d+)", value
+    )
+    if native_error:
+        return f"Windows 시스템 정보 조회에 실패했습니다. (오류 코드: {native_error.group(2)})"
+    if value.startswith(("FTP_", "SPI_QUERY_FAILED:")):
+        return "Windows 구성요소에서 설정값을 조회하지 못했습니다."
+    if value.endswith("was not present in the exported policy") or value.endswith(
+        "was not present in exported Privilege Rights"
+    ):
+        return "내보낸 로컬 보안 정책에서 해당 설정을 찾지 못했습니다."
+    if value.endswith("registry type or value unsupported"):
+        return "레지스트리 값의 형식 또는 값이 지원 범위와 다릅니다."
+    if value in {"SID conversion failed", "SID account lookup failed"}:
+        return "Windows 계정 식별정보를 확인하지 못했습니다."
+    if value == "Windows Server API is unavailable on this host":
+        return "Windows Server 점검 API를 사용할 수 없는 환경입니다."
+    if value.startswith("read-only PowerShell collection failed"):
+        return "PowerShell을 통한 읽기 전용 설정 수집에 실패했습니다."
+    if value == "PowerShell JSON output was invalid":
+        return "PowerShell 수집 결과를 해석하지 못했습니다."
+    if value == "security policy encoding is unsupported":
+        return "로컬 보안 정책 파일의 문자 인코딩을 해석하지 못했습니다."
+    if re.fullmatch(r"[A-Z][A-Z0-9_]+", value):
+        if value.endswith(("_NOT_VERIFIED", "_UNRECOGNIZED", "_OUTSIDE_DOCUMENTED_DECISION")):
+            return "수집값만으로 기준 충족 여부를 확정할 수 없습니다."
+        return "자동 판정할 수 없어 추가 확인이 필요합니다."
+    if re.search(r"[A-Za-z]", value):
+        return "설정 확인 중 오류가 발생했습니다. 자세한 내용은 JSON 결과를 확인하세요."
     return value
 
 
@@ -179,23 +209,36 @@ def _short_reason(check: dict[str, Any]) -> str:
 def print_report(report: dict[str, Any], output: Path) -> None:
     system = report["system"]
     build = system.get("windows_build") or system.get("version") or "unknown"
+    print("Windows 보안 점검 결과")
     print(f"OS: {system.get('os', 'unknown')} {system.get('release', '')}".rstrip())
-    print(f"Build: {build}")
-    print(f"관리자: {'예' if system.get('administrator') else '아니요'}")
-    print()
-    for check in report["checks"]:
-        item_id = check["item_id"]
-        print(f"[{check['status']}] {item_id} {CHECK_TITLES[item_id]}")
-        if check["status"] in {"FAIL", "UNABLE"}:
-            print(f"  사유: {_short_reason(check)}")
+    print(f"Build: {build} / 관리자: {'예' if system.get('administrator') else '아니요'} / 총 점검항목: {len(report['checks'])}")
     summary = report["summary"]
     print()
     print(
         "요약: "
-        f"PASS={summary['PASS']} FAIL={summary['FAIL']} "
-        f"UNABLE={summary['UNABLE']} NA={summary['NA']} TOTAL={len(report['checks'])}"
+        f"PASS {summary['PASS']} / FAIL {summary['FAIL']} / "
+        f"확인필요 {summary['UNABLE']} / 해당없음 {summary['NA']}"
     )
-    print(f"JSON: {output}")
+
+    groups = (
+        ("FAIL", "[!] 조치 필요"),
+        ("UNABLE", "[?] 수동 확인 필요"),
+        ("PASS", "[✓] 양호"),
+        ("NA", "[-] 해당 없음"),
+    )
+    for status, heading in groups:
+        print()
+        print(f"{heading} ({summary[status]})")
+        for check in report["checks"]:
+            if check["status"] != status:
+                continue
+            item_id = check["item_id"]
+            print(f"  {item_id} {CHECK_TITLES[item_id]}")
+            if status in {"FAIL", "UNABLE"}:
+                print(f"    사유: {_short_reason(check)}")
+
+    print()
+    print(f"JSON 저장 경로: {output}")
 
 
 def main() -> int:
