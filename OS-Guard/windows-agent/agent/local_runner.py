@@ -135,9 +135,45 @@ def _default_output() -> Path:
     return Path("results") / f"windows-check-{stamp}.json"
 
 
+CONSOLE_REASON_MAP = {
+    "WINDOWS_API_UNAVAILABLE": "Windows 설정을 읽을 수 없습니다.",
+    "LOCAL_RUNNER_UNEXPECTED_ERROR": "점검 중 예상하지 못한 오류가 발생했습니다.",
+    "Effective domain password policy requires VM verification": "도메인 적용 정책은 서버에서 추가 확인이 필요합니다.",
+    "FTP service running; no FTP sites collected; encryption cannot be verified": "FTP 서비스는 실행 중이지만 사이트가 없어 암호화 설정을 확인할 수 없습니다.",
+    "No FTP sites available for directory permission verification": "FTP 사이트가 없어 디렉터리 권한을 확인할 수 없습니다.",
+    "No FTP sites available for IP access control verification": "FTP 사이트가 없어 IP 접근 제어를 확인할 수 없습니다.",
+    "Current-user settings do not verify all applicable user sessions": "현재 사용자 설정만으로 전체 사용자 적용 여부를 확인할 수 없습니다.",
+    "collection failed": "설정 수집에 실패했습니다.",
+    "command failed": "조회 명령 실행에 실패했습니다.",
+}
+
+
+def _console_reason(reason: Any) -> str:
+    value = " ".join(str(reason).split())
+    if value in CONSOLE_REASON_MAP:
+        return CONSOLE_REASON_MAP[value]
+    if value.startswith("KISA_W"):
+        return "KISA 양호 기준을 충족하지 않습니다."
+    if value.endswith("_REQUIRES_MANUAL_REVIEW"):
+        return "운영 환경과 업무 필요성에 대한 수동 검토가 필요합니다."
+    if value.endswith("_NOT_FOUND"):
+        return "점검에 필요한 설정 또는 대상을 찾지 못했습니다."
+    if value.endswith(("_NOT_DETERMINED", "_NOT_AVAILABLE")):
+        return "점검에 필요한 설정값을 확인할 수 없습니다."
+    if "registry value absent; effective default not verified" in value:
+        return "레지스트리 값이 없고 실효 기본값을 확인할 수 없습니다."
+    if "registry read failed" in value:
+        return "레지스트리 설정을 읽지 못했습니다."
+    if "security policy export failed" in value:
+        return "로컬 보안 정책을 내보내지 못했습니다."
+    if "access denied" in value.lower() or "ACCESS_DENIED" in value:
+        return "권한이 부족하여 설정을 확인할 수 없습니다."
+    return value
+
+
 def _short_reason(check: dict[str, Any]) -> str:
     reason = check.get("error_reason") or check.get("reason_code") or "사유 없음"
-    return " ".join(str(reason).split())[:160]
+    return _console_reason(reason)[:160]
 
 
 def print_report(report: dict[str, Any], output: Path) -> None:
