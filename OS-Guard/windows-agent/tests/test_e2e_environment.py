@@ -1,4 +1,6 @@
 from copy import deepcopy
+import io
+from contextlib import redirect_stdout
 import unittest
 from unittest.mock import patch
 import winreg
@@ -57,3 +59,37 @@ class E2EEnvironmentTests(unittest.TestCase):
             self.assertNotIn("Caption", query)
             api.return_value._run_powershell_json.side_effect = OSError("query failed")
             with self.assertRaises(OSError): script.collect_environment()
+
+    def test_query_failure_preserves_stage_and_message(self):
+        for location, reason in (("OS_CIM", "CIM_QUERY_FAILED"), ("COMPUTER_CIM", "CIM_QUERY_FAILED"),
+                                 ("GPO_CIM", "GPO_QUERY_FAILED")):
+            with self.subTest(location=location), patch.object(script, "NativeWindowsReadOnlyApi") as api:
+                api.return_value._run_powershell_json.return_value = [{**self.info, "diagnostic_error":
+                    {"location": location, "exception_type": "CimException", "message": "Access denied"}}]
+                with redirect_stdout(io.StringIO()), self.assertRaises(script.EnvironmentDiagnosticError) as error:
+                    script.collect_environment()
+                self.assertEqual(error.exception.reason_code, reason)
+                self.assertEqual(error.exception.location, location)
+                self.assertIn("Access denied", str(error.exception))
+
+    def test_diagnose_option_never_checks_or_changes_registry(self):
+        with patch.object(script, "_is_administrator", return_value=True), patch.object(script, "require_local_policy"), patch.object(script, "get_action") as action, patch.object(script, "collect_check") as check, patch.object(script, "prepare_fail") as prepare, patch("builtins.input") as approval, redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(script.main(["--code", "W-07", "--diagnose-env"]), 0)
+            action.assert_not_called()
+            check.assert_not_called()
+            prepare.assert_not_called()
+            approval.assert_not_called()
+            self.assertIn("진단 전용", output.getvalue())
+
+    def test_skip_prints_reason_location_and_exception_message(self):
+        error = script.EnvironmentDiagnosticError("GPO_QUERY_FAILED", "GPO_CIM", "Invalid class")
+        with patch.object(script, "_is_administrator", return_value=True), patch.object(script, "require_local_policy", side_effect=error), redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(script.main(["--code", "W-07", "--diagnose-env"]), 1)
+        for text in ("GPO_QUERY_FAILED", "GPO_CIM", "Invalid class", "[SKIP]"):
+            self.assertIn(text, output.getvalue())
+
+    def test_success_diagnostics_show_all_environment_fields(self):
+        with redirect_stdout(io.StringIO()) as output:
+            self.verify(self.info)
+        for text in ("OS 판정: PASS", "Build=20348", "ProductType=3", "PartOfDomain=False", "GPO 조회=verified", "적용 GPO 개수=0"):
+            self.assertIn(text, output.getvalue())
