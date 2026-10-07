@@ -1,6 +1,7 @@
 """격리 Server 2022 VM 전용: 한 항목 준비·승인·조치·원복·원본 복구."""
 
 import argparse
+import ctypes
 from dataclasses import asdict, replace
 from copy import deepcopy
 import sys
@@ -15,8 +16,79 @@ from agent.hardening import ApprovalGate, HardeningRunner, HardeningState, SEMI_
 from agent.hardening.models import PolicySnapshot
 from agent.hardening.registry import get_action
 from agent.hardening.actions import RegistryValueAction
-from agent.hardening.policy_actions import PolicyTransactionAction, require_local_policy
+from agent.hardening.policy_actions import (
+    PolicyTransactionAction, PolicySafetyError, verify_local_gpo_files, system_executable,
+)
 from agent.hardening.runner import _is_administrator
+from agent.checks.common import NativeWindowsReadOnlyApi
+
+
+def collect_environment():
+    # 고정 읽기 전용 CIM 조회: Caption/Domain/gpresult 표시 문자열을 해석하지 않는다.
+    script = r"""
+$os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+$computer = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
+$state = 'verified'
+$gpos = @()
+try {
+  $gpos = @(Get-CimInstance -Namespace root\RSOP\Computer -ClassName RSOP_GPO -ErrorAction Stop |
+    ForEach-Object { [pscustomobject]@{ id = [string]$_.id } })
+} catch {
+  if ($_.Exception -is [Microsoft.Management.Infrastructure.CimException] -and
+      $_.Exception.StatusCode -eq [Microsoft.Management.Infrastructure.CimStatusCode]::InvalidNamespace) {
+    $state = 'namespace_absent'
+  } else { throw }
+}
+$data = @([pscustomobject]@{
+  version = [string]$os.Version; build = [string]$os.BuildNumber
+  product_type = [int]$os.ProductType; domain_joined = $computer.PartOfDomain
+  domain_role = [int]$computer.DomainRole; gpo_state = $state; gpos = @($gpos)
+})
+ConvertTo-Json -InputObject $data -Depth 4 -Compress
+"""
+    rows = NativeWindowsReadOnlyApi()._run_powershell_json(script)
+    if len(rows) != 1 or not isinstance(rows[0], dict):
+        raise PolicySafetyError("structured environment query failed")
+    return rows[0]
+
+
+def verify_no_policy_history():
+    import winreg
+    # RSoP namespace가 없더라도 정책 적용 이력이 남은 장비는 허용하지 않는다.
+    for path in (
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\History",
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\State\Machine\GPO-List",
+    ):
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path, 0,
+                                winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as key:
+                subkeys, values, _ = winreg.QueryInfoKey(key)
+                if subkeys or values:
+                    raise PolicySafetyError("policy history is present or cannot be resolved")
+        except FileNotFoundError:
+            pass
+
+
+def require_local_policy():
+    # E2E 전용 검사. 제품 Hardening의 정책 검사 함수는 변경하지 않는다.
+    info = collect_environment()
+    if (info.get("version") != "10.0.20348" or str(info.get("build")) != "20348"
+            or type(info.get("product_type")) is not int or info["product_type"] != 3
+            or ctypes.sizeof(ctypes.c_void_p) != 8):
+        raise PolicySafetyError("64-bit Windows Server 2022 could not be verified")
+    if info.get("domain_joined") is not False or type(info.get("domain_role")) is not int or info["domain_role"] != 2:
+        raise PolicySafetyError("standalone non-domain server could not be verified")
+    gpos = info.get("gpos")
+    if not isinstance(gpos, list) or any(
+        not isinstance(gpo, dict) or gpo.get("id") != "LocalGPO" for gpo in gpos
+    ):
+        raise PolicySafetyError("non-local or unknown GPO is present")
+    if info.get("gpo_state") not in {"verified", "namespace_absent"}:
+        raise PolicySafetyError("GPO query is unverified")
+    if info["gpo_state"] == "namespace_absent" and gpos:
+        raise PolicySafetyError("inconsistent GPO query")
+    verify_local_gpo_files(Path(system_executable("gpresult.exe")).parent)
+    verify_no_policy_history()
 
 FAIL_VALUES = {
     "W-07": 1, "W-13": 0, "W-15": 0, "W-48": 1,
