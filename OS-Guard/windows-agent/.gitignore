@@ -2,4 +2,7 @@ identity.json
 *.log
 __pycache__/
 .pytest_cache/
+central-state.dpapi
+central.lock
+*.dpapi.tmp
 

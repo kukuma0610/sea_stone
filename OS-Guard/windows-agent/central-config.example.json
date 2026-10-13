@@ -1,0 +1,12 @@
+{
+  "central_server_url": "https://central.example/agent-api/v2",
+  "manifest_file": "approved-windows-manifest.json",
+  "state_dir": "C:/Users/<runtime-account>/AppData/Local/OS-Guard/central",
+  "ca_file": "public-os-guard-ca.pem",
+  "ca_sha256_fingerprint": "",
+  "timeout_sec": 10,
+  "retry_count": 5,
+  "retry_base_sec": 1,
+  "poll_interval_sec": 10,
+  "lease_renewal_fraction": 0.3333333333333333
+}
