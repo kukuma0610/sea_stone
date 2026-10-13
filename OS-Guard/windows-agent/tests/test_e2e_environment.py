@@ -72,6 +72,7 @@ class E2EEnvironmentTests(unittest.TestCase):
                 self.assertEqual(error.exception.location, location)
                 self.assertIn("Access denied", str(error.exception))
 
+    @patch.object(script, "diagnose_live_gpo", new=lambda: None)
     def test_diagnose_option_never_checks_or_changes_registry(self):
         with patch.object(script, "_is_administrator", return_value=True), patch.object(script, "require_local_policy"), patch.object(script, "get_action") as action, patch.object(script, "collect_check") as check, patch.object(script, "prepare_fail") as prepare, patch("builtins.input") as approval, redirect_stdout(io.StringIO()) as output:
             self.assertEqual(script.main(["--code", "W-07", "--diagnose-env"]), 0)
@@ -81,6 +82,7 @@ class E2EEnvironmentTests(unittest.TestCase):
             approval.assert_not_called()
             self.assertIn("진단 전용", output.getvalue())
 
+    @patch.object(script, "diagnose_live_gpo", new=lambda: None)
     def test_skip_prints_reason_location_and_exception_message(self):
         error = script.EnvironmentDiagnosticError("GPO_QUERY_FAILED", "GPO_CIM", "Invalid class")
         with patch.object(script, "_is_administrator", return_value=True), patch.object(script, "require_local_policy", side_effect=error), redirect_stdout(io.StringIO()) as output:
@@ -116,6 +118,35 @@ class E2EEnvironmentTests(unittest.TestCase):
             script.verify_no_policy_history()
         with patch.object(winreg, "OpenKey"), patch.object(winreg, "QueryInfoKey", return_value=(0, 1, 0)), patch.object(winreg, "EnumValue", side_effect=PermissionError), redirect_stdout(io.StringIO()), self.assertRaises(PermissionError):
             script.verify_no_policy_history()
+
+    def test_policy_overdue_zero_is_not_assumed_safe(self):
+        # 실환경 값이 0이어도 의미를 입증할 근거 없이 허용하지 않는다.
+        info = {**self.info, "gpos": [{"id": "LocalGPO"}]}
+        for entry in (("PolicyOverdue", 0, winreg.REG_DWORD), ("PolicyOverdue", 1, winreg.REG_DWORD), ("PolicyOverdue", "0", winreg.REG_SZ)):
+            with self.subTest(entry=entry), patch.object(script, "collect_environment", return_value=info), patch.object(script, "system_executable", return_value="C:/Windows/System32/gpresult.exe"), patch.object(script, "verify_local_gpo_files"), patch.object(winreg, "OpenKey"), patch.object(winreg, "QueryInfoKey", return_value=(0, 1, 0)), patch.object(winreg, "EnumValue", return_value=entry), redirect_stdout(io.StringIO()) as output:
+                with self.assertRaises(script.EnvironmentDiagnosticError) as error:
+                    script.require_local_policy()
+                self.assertEqual(error.exception.reason_code, "POLICY_HISTORY_FOUND")
+                self.assertIn("PolicyOverdue", output.getvalue())
+                self.assertIn("HISTORY_OR_UNKNOWN", output.getvalue())
+
+    def test_policy_overdue_additional_values_subkeys_and_read_failure_blocked(self):
+        for subkeys, entries in ((0, [("PolicyOverdue", 0, winreg.REG_DWORD), ("IsSlowLink", 0, winreg.REG_DWORD)]), (1, [("PolicyOverdue", 0, winreg.REG_DWORD)])):
+            with self.subTest(subkeys=subkeys), patch.object(winreg, "OpenKey"), patch.object(winreg, "QueryInfoKey", return_value=(subkeys, len(entries), 0)), patch.object(winreg, "EnumValue", side_effect=entries), patch.object(winreg, "EnumKey", return_value="{domain-gpo-guid}"), redirect_stdout(io.StringIO()), self.assertRaises(script.EnvironmentDiagnosticError):
+                script.verify_no_policy_history()
+        with patch.object(winreg, "OpenKey"), patch.object(winreg, "QueryInfoKey", return_value=(0, 1, 0)), patch.object(winreg, "EnumValue", side_effect=PermissionError), redirect_stdout(io.StringIO()), self.assertRaises(PermissionError):
+            script.verify_no_policy_history()
+
+    @patch.object(script, "diagnose_live_gpo", new=lambda: None)
+    def test_policy_overdue_diagnostic_failure_never_enters_mutating_path(self):
+        # 화면 요약만으로는 정책 이벤트의 동일 처리 세션을 검증할 수 없다.
+        info = {**self.info, "gpos": [{"id": "LocalGPO", "version": 0}]}
+        with patch.object(script, "_is_administrator", return_value=True), patch.object(script, "collect_environment", return_value=info), patch.object(script, "system_executable", return_value="C:/Windows/System32/gpresult.exe"), patch.object(script, "verify_local_gpo_files"), patch.object(winreg, "OpenKey"), patch.object(winreg, "QueryInfoKey", return_value=(0, 1, 0)), patch.object(winreg, "EnumValue", return_value=("PolicyOverdue", 0, winreg.REG_DWORD)), patch.object(script, "get_action") as action, patch.object(script, "prepare_fail") as prepare, patch.object(script, "collect_check") as check, patch("builtins.input") as approval, redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(script.main(["--code", "W-07", "--diagnose-env"]), 1)
+            for unused in (action, prepare, check, approval):
+                unused.assert_not_called()
+            for message in ("PolicyOverdue", "REG_DWORD", "data=0", "POLICY_HISTORY_FOUND", "[SKIP]"):
+                self.assertIn(message, output.getvalue())
 
     def test_local_rsop_object_count_is_not_applied_domain_gpo_count(self):
         self.info["gpos"] = [{"id": "LocalGPO", "enabled": True, "access_denied": False,

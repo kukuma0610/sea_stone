@@ -22,6 +22,7 @@ from agent.hardening.policy_actions import (
 )
 from agent.hardening.runner import _is_administrator
 from agent.checks.common import NativeWindowsReadOnlyApi
+from scripts.gpo_live_diagnostics import diagnose as diagnose_live_gpo
 
 
 class EnvironmentDiagnosticError(PolicySafetyError):
@@ -240,6 +241,8 @@ def main(argv=None):
             print("[거부] 관리자 권한 필요; 변경 없음")
             return 1
         try:
+            if args.diagnose_env:
+                diagnose_live_gpo()
             require_local_policy()
         except Exception as exc:
             report_environment_exception(exc, "ENVIRONMENT_CHECK_FAILED", "ENVIRONMENT")
