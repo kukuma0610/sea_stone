@@ -38,7 +38,9 @@ def main(argv=None):
         if args.command in {"enroll", "online"}:
             manifest = RegistrationRelease()
         else:
-            manifest_path = local_path("manifest_file")
+            # 배포 소스에 포함된 승인 manifest가 기본값이다. 명시 경로가 잘못되면 fallback하지 않는다.
+            manifest_path = (local_path("manifest_file") if "manifest_file" in config else
+                             Path(__file__).resolve().with_name("manifest-windows-64-2026-v1.json"))
             reject_reparse(manifest_path)
             manifest = Manifest(json.loads(manifest_path.read_text(encoding="utf-8")))
         ca = local_path("ca_file") if config.get("ca_file") else None

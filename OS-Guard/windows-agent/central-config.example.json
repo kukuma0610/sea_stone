@@ -1,6 +1,6 @@
 {
   "central_server_url": "https://central.example/agent-api/v2",
-  "manifest_file": "approved-windows-manifest.json",
+  "manifest_file": "C:/OSGuard/manifest-windows-64-2026-v1.json",
   "state_dir": "C:/Users/<runtime-account>/AppData/Local/OS-Guard/central",
   "ca_file": "public-os-guard-ca.pem",
   "ca_sha256_fingerprint": "",

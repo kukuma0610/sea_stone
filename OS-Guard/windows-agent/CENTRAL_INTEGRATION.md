@@ -11,7 +11,8 @@
 
 ## 실제 실행 전 필요한 입력
 
-- CHECK에는 승인된 Windows 릴리스 local manifest가 필요하다. 등록/online은 승인된
+- CHECK에는 승인된 Windows 릴리스 local manifest가 필요하다. 이제
+  agent/central/manifest-windows-64-2026-v1.json을 배포 소스에 함께 포함한다. 등록/online은 승인된
   platform=windows, module_version=windows-2026.1, manifest_id=manifest-windows-64-2026-v1을 보고한다.
   이 등록 identity는 지원 OS 범위를 확대하거나 CHECK 실행 manifest를 대체하지 않는다.
 - 정상 공개 CA와 별도 신뢰 경로로 확보한 DER SHA256 지문.
@@ -23,7 +24,29 @@ manifest는 schema_version=1.0, platform=windows, 승인된 manifest_id/module_v
 supported_os의 family/version/build/architecture, 64개 items를 요구한다.
 각 item은 실제 W-code, `module=agent.checks.wXX`, implemented=true, actions=[CHECK]를 사용한다.
 로컬 파일의 module 문자열은 검증만 하며 동적 import/원격 파일 실행에 사용하지 않는다.
-이 loader 표현과 실제 릴리스·지원 OS 선언은 중앙 담당자와 최종 확인해야 한다.
+이번 CHECK Manifest는 사용자 승인 identity와 64개 실제 mapping을 사용한다.
+지원 범위는 WINDOWS / 10.0.20348 / Build 20348 / AMD64로 제한한다.
+동일 Build 내 모든 역할/에디션/도메인 구성의 검증 완료나 모든 항목의 자동판정을 뜻하지 않는다.
+Central의 실제 seed 내용은 이번 작업에서 직접 조회하지 않았으므로 실제 Task identity/기준 snapshot과
+E2E 단계에서 최종 확인한다. KISA criteria projection은 로컬 실행 manifest와 별개다.
+
+## 실제 CHECK 실행 manifest 경로
+
+run/once의 config에서 manifest_file을 생략하면 agent/central에 함께 배포한 승인 JSON을 자동 사용한다.
+명시한 manifest_file이 없거나 잘못되었으면 자동 fallback하지 않고 차단한다.
+상대 경로는 config 파일 디렉터리 기준이다. 사용자에게 JSON을 작성하게 하지 않는다.
+예시 config의 C:/OSGuard/manifest-windows-64-2026-v1.json을 사용하려면 승인 파일을 그 위치로 복사하거나,
+실제 저장소의 절대 경로를 설정한다. 기존 파일을 확인 없이 덮어쓰지 않는다.
+
+```powershell
+# manifest_file을 생략한 기존 등록용 config도 기본 승인 JSON을 사용한다.
+python -m agent.central run --config C:\OSGuard\central-config.json
+```
+
+무작업이면 Heartbeat/Inventory 후 Claim 204를 정상 처리하고 대기한다.
+실제 Task는 동일 manifest_id/module_version이어야 하며 기존 CHECK 모듈만 실행한다.
+os-guard-local-check.exe는 Central Agent가 아니다. 향후 별도 EXE 패키징에서는 이 JSON을
+agent/central의 data asset으로 함께 포함해야 하며, 이번 작업은 소스 배포 파일/기본 경로를 제공한다.
 
 ## 공식 foreground 명령
 

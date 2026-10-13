@@ -1,0 +1,529 @@
+{
+  "schema_version": "1.0",
+  "platform": "windows",
+  "manifest_id": "manifest-windows-64-2026-v1",
+  "module_version": "windows-2026.1",
+  "simulation": false,
+  "supported_os": [
+    {
+      "family": "WINDOWS",
+      "version": "10.0.20348",
+      "build": "20348",
+      "architecture": "AMD64"
+    }
+  ],
+  "items": [
+    {
+      "item_id": "W-01",
+      "module": "agent.checks.w01",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-02",
+      "module": "agent.checks.w02",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-03",
+      "module": "agent.checks.w03",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-04",
+      "module": "agent.checks.w04",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-05",
+      "module": "agent.checks.w05",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-06",
+      "module": "agent.checks.w06",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-07",
+      "module": "agent.checks.w07",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-08",
+      "module": "agent.checks.w08",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-09",
+      "module": "agent.checks.w09",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-10",
+      "module": "agent.checks.w10",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-11",
+      "module": "agent.checks.w11",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-12",
+      "module": "agent.checks.w12",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-13",
+      "module": "agent.checks.w13",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-14",
+      "module": "agent.checks.w14",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-15",
+      "module": "agent.checks.w15",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-16",
+      "module": "agent.checks.w16",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-17",
+      "module": "agent.checks.w17",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-18",
+      "module": "agent.checks.w18",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-19",
+      "module": "agent.checks.w19",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-20",
+      "module": "agent.checks.w20",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-21",
+      "module": "agent.checks.w21",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-22",
+      "module": "agent.checks.w22",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-23",
+      "module": "agent.checks.w23",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-24",
+      "module": "agent.checks.w24",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-25",
+      "module": "agent.checks.w25",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-26",
+      "module": "agent.checks.w26",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-27",
+      "module": "agent.checks.w27",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-28",
+      "module": "agent.checks.w28",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-29",
+      "module": "agent.checks.w29",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-30",
+      "module": "agent.checks.w30",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-31",
+      "module": "agent.checks.w31",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-32",
+      "module": "agent.checks.w32",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-33",
+      "module": "agent.checks.w33",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-34",
+      "module": "agent.checks.w34",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-35",
+      "module": "agent.checks.w35",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-36",
+      "module": "agent.checks.w36",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-37",
+      "module": "agent.checks.w37",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-38",
+      "module": "agent.checks.w38",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-39",
+      "module": "agent.checks.w39",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-40",
+      "module": "agent.checks.w40",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-41",
+      "module": "agent.checks.w41",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-42",
+      "module": "agent.checks.w42",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-43",
+      "module": "agent.checks.w43",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-44",
+      "module": "agent.checks.w44",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-45",
+      "module": "agent.checks.w45",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-46",
+      "module": "agent.checks.w46",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-47",
+      "module": "agent.checks.w47",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-48",
+      "module": "agent.checks.w48",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-49",
+      "module": "agent.checks.w49",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-50",
+      "module": "agent.checks.w50",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-51",
+      "module": "agent.checks.w51",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-52",
+      "module": "agent.checks.w52",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-53",
+      "module": "agent.checks.w53",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-54",
+      "module": "agent.checks.w54",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-55",
+      "module": "agent.checks.w55",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-56",
+      "module": "agent.checks.w56",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-57",
+      "module": "agent.checks.w57",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-58",
+      "module": "agent.checks.w58",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-59",
+      "module": "agent.checks.w59",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-60",
+      "module": "agent.checks.w60",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-61",
+      "module": "agent.checks.w61",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-62",
+      "module": "agent.checks.w62",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-63",
+      "module": "agent.checks.w63",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    },
+    {
+      "item_id": "W-64",
+      "module": "agent.checks.w64",
+      "implemented": true,
+      "actions": [
+        "CHECK"
+      ]
+    }
+  ]
+}
