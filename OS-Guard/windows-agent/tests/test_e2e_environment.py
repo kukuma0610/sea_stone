@@ -45,7 +45,7 @@ class E2EEnvironmentTests(unittest.TestCase):
             script.verify_no_policy_history()
         with patch.object(winreg, "OpenKey", side_effect=PermissionError):
             with self.assertRaises(PermissionError): script.verify_no_policy_history()
-        with patch.object(winreg, "OpenKey"), patch.object(winreg, "QueryInfoKey", return_value=(1, 0, 0)):
+        with patch.object(winreg, "OpenKey"), patch.object(winreg, "QueryInfoKey", return_value=(1, 0, 0)), patch.object(winreg, "EnumKey", return_value="{real-gpo-guid}"):
             with self.assertRaises(PolicySafetyError): script.verify_no_policy_history()
 
     def test_structured_collection_does_not_invoke_gpresult(self):
@@ -93,3 +93,35 @@ class E2EEnvironmentTests(unittest.TestCase):
             self.verify(self.info)
         for text in ("OS 판정: PASS", "Build=20348", "ProductType=3", "PartOfDomain=False", "GPO 조회=verified", "적용 GPO 개수=0"):
             self.assertIn(text, output.getvalue())
+
+    def test_known_link_metadata_is_not_gpo_application_history(self):
+        for value in (0, 1):
+            with patch.object(winreg, "OpenKey") as opened, patch.object(winreg, "QueryInfoKey", return_value=(0, 1, 0)), patch.object(winreg, "EnumValue", return_value=("IsSlowLink", value, winreg.REG_DWORD)), redirect_stdout(io.StringIO()) as output:
+                opened.side_effect = [opened.return_value, FileNotFoundError()]
+                script.verify_no_policy_history()
+            for text in ("IsSlowLink", "REG_DWORD", f"data={value}", "METADATA"):
+                self.assertIn(text, output.getvalue())
+
+    def test_unknown_metadata_and_actual_gpo_values_remain_blocked(self):
+        for entry in (("GPOName", "{12345678-1234-1234-1234-123456789abc}", winreg.REG_SZ),
+                      ("DSPath", "LDAP://domain/policy", winreg.REG_SZ),
+                      ("UnknownValue", 0, winreg.REG_DWORD),
+                      ("IsSlowLink", "0", winreg.REG_SZ),
+                      ("IsSlowLink", 2, winreg.REG_DWORD)):
+            with self.subTest(entry=entry), patch.object(winreg, "OpenKey"), patch.object(winreg, "QueryInfoKey", return_value=(0, 1, 0)), patch.object(winreg, "EnumValue", return_value=entry), redirect_stdout(io.StringIO()), self.assertRaises(script.EnvironmentDiagnosticError):
+                script.verify_no_policy_history()
+
+    def test_metadata_does_not_hide_gpo_subkeys_or_query_failure(self):
+        with patch.object(winreg, "OpenKey"), patch.object(winreg, "QueryInfoKey", return_value=(1, 1, 0)), patch.object(winreg, "EnumValue", return_value=("IsSlowLink", 0, winreg.REG_DWORD)), patch.object(winreg, "EnumKey", return_value="{domain-gpo-guid}"), redirect_stdout(io.StringIO()), self.assertRaises(script.EnvironmentDiagnosticError):
+            script.verify_no_policy_history()
+        with patch.object(winreg, "OpenKey"), patch.object(winreg, "QueryInfoKey", return_value=(0, 1, 0)), patch.object(winreg, "EnumValue", side_effect=PermissionError), redirect_stdout(io.StringIO()), self.assertRaises(PermissionError):
+            script.verify_no_policy_history()
+
+    def test_local_rsop_object_count_is_not_applied_domain_gpo_count(self):
+        self.info["gpos"] = [{"id": "LocalGPO", "enabled": True, "access_denied": False,
+                              "filter_allowed": True, "version": 0}]
+        with redirect_stdout(io.StringIO()) as output:
+            self.verify(self.info)
+        self.assertIn("RSOP 객체 개수=1", output.getvalue())
+        self.assertIn("적용 GPO 개수=0", output.getvalue())
+        self.assertIn('"id": "LocalGPO"', output.getvalue())

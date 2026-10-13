@@ -2,6 +2,7 @@
 
 import argparse
 import ctypes
+import json
 from dataclasses import asdict, replace
 from copy import deepcopy
 import sys
@@ -58,7 +59,10 @@ $state = 'verified'
 $gpos = @()
 try {
   $gpos = @(Get-CimInstance -Namespace root\RSOP\Computer -ClassName RSOP_GPO -ErrorAction Stop |
-    ForEach-Object { [pscustomobject]@{ id = [string]$_.id } })
+    ForEach-Object { [pscustomobject]@{
+      id = [string]$_.id; enabled = $_.enabled; access_denied = $_.accessDenied
+      filter_allowed = $_.filterAllowed; version = $_.version
+    } })
 } catch {
   if ($_.Exception -is [Microsoft.Management.Infrastructure.CimException] -and
       $_.Exception.StatusCode -eq [Microsoft.Management.Infrastructure.CimStatusCode]::InvalidNamespace) {
@@ -109,7 +113,25 @@ def verify_no_policy_history():
                                 winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as key:
                 subkeys, values, _ = winreg.QueryInfoKey(key)
                 print(f"[환경] 정책 이력 {path}: subkeys={subkeys}, values={values}")
-                if subkeys or values:
+                meaningful = False
+                for index in range(values):
+                    name, data, kind = winreg.EnumValue(key, index)
+                    # Microsoft 문서상 IsSlowLink는 네트워크 링크 상태 메타데이터이다.
+                    metadata = (path.endswith("\\History") and name.casefold() == "isslowlink"
+                                and kind == winreg.REG_DWORD and type(data) is int and data in (0, 1))
+                    empty_default = name == "" and kind == winreg.REG_SZ and data == ""
+                    classification = "METADATA" if metadata or empty_default else "HISTORY_OR_UNKNOWN"
+                    type_name = {winreg.REG_SZ: "REG_SZ", winreg.REG_DWORD: "REG_DWORD",
+                                 winreg.REG_EXPAND_SZ: "REG_EXPAND_SZ", winreg.REG_MULTI_SZ: "REG_MULTI_SZ"}.get(kind, str(kind))
+                    # 관련 GPO 정보만 출력하며 비밀값으로 의심되는 이름은 데이터를 마스킹한다.
+                    display_data = "[MASKED]" if any(word in name.casefold() for word in
+                        ("password", "token", "secret", "credential", "privatekey")) else data
+                    print(f"[환경] History value name={name!r}, type={type_name}, "
+                          f"data={display_data!r}, classification={classification}")
+                    meaningful = meaningful or not (metadata or empty_default)
+                for index in range(subkeys):
+                    print(f"[환경] History subkey={winreg.EnumKey(key, index)!r}")
+                if subkeys or meaningful:
                     raise EnvironmentDiagnosticError("POLICY_HISTORY_FOUND", "POLICY_HISTORY", "policy history is present or cannot be resolved")
         except FileNotFoundError:
             print(f"[환경] 정책 이력 {path}: 없음")
@@ -121,8 +143,15 @@ def require_local_policy():
     print(f"[환경] OS 판정 입력: Version={info.get('version')}, Build={info.get('build')}, "
           f"ProductType={info.get('product_type')}, Python bits={ctypes.sizeof(ctypes.c_void_p) * 8}")
     print(f"[환경] PartOfDomain={info.get('domain_joined')}, DomainRole={info.get('domain_role')}")
-    print(f"[환경] GPO 조회={info.get('gpo_state')}, 적용 GPO 개수="
-          f"{len(info['gpos']) if isinstance(info.get('gpos'), list) else '미확인'}")
+    raw_gpos = info.get("gpos")
+    if isinstance(raw_gpos, list):
+        nonlocal_count = sum(not isinstance(gpo, dict) or gpo.get("id") != "LocalGPO" for gpo in raw_gpos)
+        print(f"[환경] GPO 조회={info.get('gpo_state')}, RSOP 객체 개수={len(raw_gpos)}, "
+              f"적용 GPO 개수={nonlocal_count} (LocalGPO는 파일 내용 별도 검사)")
+        for index, gpo in enumerate(raw_gpos):
+            print(f"[환경] GPO count 근거 객체[{index}]={json.dumps(gpo, ensure_ascii=False)}")
+    else:
+        print(f"[환경] GPO 조회={info.get('gpo_state')}, 적용 GPO 개수=미확인")
     if (info.get("version") != "10.0.20348" or str(info.get("build")) != "20348"
             or type(info.get("product_type")) is not int or info["product_type"] != 3
             or ctypes.sizeof(ctypes.c_void_p) != 8):
