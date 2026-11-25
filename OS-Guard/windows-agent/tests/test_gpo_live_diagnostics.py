@@ -39,7 +39,108 @@ def snapshot():
             "truncated": False, "before_record": 21, "after_record": 21, "events": events}
 
 
+def with_user_session(start=4001, version=1):
+    data = snapshot()
+    activity = "{11111111-1111-1111-1111-111111111111}"
+    flag = "0" if version == 1 else "false"
+    data["events"].extend([
+        event(start, 30, {"PolicyActivityId": activity, "IsMachine": flag,
+                          "IsDomainJoined": "false"}, version, activity),
+        event(5126, 31, {"IsMachine": "false", "NumberOfGPOsDownloaded": 0,
+                          "NumberOfGPOsApplicable": 0}, activity=activity),
+        event(5312, 32, {"GPOInfoList": ""}, activity=activity),
+        event(5313, 33, {"GPOInfoList": '<GPO><Version>0</Version><SOM>Local</SOM><Reason>NOTAPPLIED-EMPTY</Reason></GPO>'}, activity=activity),
+        event(live.USER_STARTS[start], 34, {"PolicyElaspedTimeInSeconds": 1, "ErrorCode": 0,
+                          "PrincipalSamName": "private-user", "IsMachine": flag,
+                          "IsConnectivityFailure": "false"}, version, activity),
+        event(5117, 35, {"IsMachine": "false", "SessionTimeElapsedInMilliseconds": 79}, activity=activity),
+    ])
+    data.update(before_record=35, after_record=35)
+    return data
+
+
 class LiveGpoTests(unittest.TestCase):
+    def test_all_user_session_pairs_are_separate_from_computer_evidence(self):
+        for start in live.USER_STARTS:
+            for version in (0, 1):
+                with self.subTest(start=start, version=version):
+                    result = live.validate(with_user_session(start, version))
+                    self.assertEqual(result["session_count"], 1)
+                    self.assertEqual(result["user_session_count"], 1)
+                    self.assertEqual(result["start_record"], 10)
+                    self.assertEqual(result["end_record"], 21)
+
+    def test_user_error_missing_activity_and_scope_mismatch_are_blocked(self):
+        for old, new in (('<Data Name="ErrorCode">0', '<Data Name="ErrorCode">5'),
+                         ('ActivityID="{11111111-1111-1111-1111-111111111111}"', 'ActivityID=""'),
+                         ('<Data Name="IsMachine">0', '<Data Name="IsMachine">1'),
+                         ('<Version>1</Version>', '<Version>2</Version>')):
+            data = with_user_session()
+            self.assertIn(old, data["events"][-2])
+            data["events"][-2] = data["events"][-2].replace(old, new)
+            with self.subTest(old=old), self.assertRaises(live.LiveDiagnosticError):
+                live.validate(data)
+
+    def test_user_orphan_incomplete_duplicate_and_cross_session_fail(self):
+        for index in (6, -2, -1):
+            data = with_user_session()
+            data["events"].pop(index)
+            with self.subTest(index=index), self.assertRaises(live.LiveDiagnosticError):
+                live.validate(data)
+        data = with_user_session()
+        data["events"][-2] = data["events"][-2].replace(
+            "{11111111-1111-1111-1111-111111111111}", ACTIVITY)
+        with self.assertRaises(live.LiveDiagnosticError): live.validate(data)
+
+    def test_user_session_cannot_replace_computer_current_boot_session(self):
+        data = with_user_session()
+        data["events"] = data["events"][6:]
+        with self.assertRaises(live.LiveDiagnosticError) as caught:
+            live.validate(data)
+        self.assertEqual(caught.exception.reason_code, "GPO_CURRENT_BOOT_START_MISSING")
+
+    def test_user_applied_policy_is_not_hidden_by_computer_zero_policy(self):
+        for index, old, new in (
+            (7, '<Data Name="NumberOfGPOsApplicable">0', '<Data Name="NumberOfGPOsApplicable">1'),
+            (8, '<Data Name="GPOInfoList" />', '<Data Name="GPOInfoList">policy</Data>')):
+            data = with_user_session()
+            self.assertIn(old, data["events"][index])
+            data["events"][index] = data["events"][index].replace(old, new)
+            with self.subTest(index=index), self.assertRaises(live.LiveDiagnosticError) as caught:
+                live.validate(data)
+            self.assertEqual(caught.exception.reason_code, "GPO_USER_APPLIED_POLICY_FOUND")
+
+    def test_warning_error_end_ids_fail_even_if_level_is_information(self):
+        for eid in live.FAILED_ENDS:
+            data = snapshot()
+            data["events"].append(event(eid, 40, {"ErrorCode": 0}))
+            data.update(before_record=40, after_record=40)
+            with self.subTest(eid=eid), self.assertRaises(live.LiveDiagnosticError):
+                live.validate(data)
+
+    def test_inventory_reports_all_types_without_account_or_field_values(self):
+        data = with_user_session()
+        data["events"].extend([event(5351, 40, {"IsMachine": "true"}, activity=""),
+                                event(9999, 41, {"GPOInfoList": "private-policy"})])
+        result = live.event_inventory(data)
+        self.assertTrue(any(e["event_id"] == 8001 and e["role"] == "USER" for e in result))
+        self.assertTrue(any(e["event_id"] == 5351 and e["role"] == "GENERAL" for e in result))
+        self.assertTrue(any(e["event_id"] == 9999 and e["role"] == "UNSUPPORTED" for e in result))
+        self.assertNotIn("private-user", str(result))
+        self.assertNotIn("private-policy", str(result))
+        self.assertIn("PrincipalSamName", str(result))
+
+    def test_detailed_query_lists_all_types_before_failing_validation(self):
+        data = with_user_session()
+        data["events"][-2] = data["events"][-2].replace('<Data Name="ErrorCode">0', '<Data Name="ErrorCode">5')
+        output = io.StringIO()
+        with patch.object(live, "NativeWindowsReadOnlyApi") as api, redirect_stdout(output):
+            api.return_value._run_powershell_json.return_value = [data]
+            with self.assertRaises(live.LiveDiagnosticError): live.collect(detailed=True)
+        self.assertIn('"event_id": 8001', output.getvalue())
+        self.assertIn('"event_id": 4000', output.getvalue())
+        self.assertNotIn("private-user", output.getvalue())
+
     def test_missing_activity_is_classified_not_attribute_error(self):
         for event_id in (*live.STARTS, *live.STARTS.values(), 5117, 5126, 5312, 5313):
             for correlation in ("", "<Correlation />", '<Correlation ActivityID="" />'):

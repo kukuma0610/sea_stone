@@ -1,6 +1,7 @@
 """E2E 진단 전용. 이벤트 관측 성공은 History 예외 승인 근거로 사용하지 않는다."""
 
 from datetime import datetime
+import json
 from uuid import UUID
 import xml.etree.ElementTree as ET
 
@@ -9,9 +10,16 @@ from agent.checks.common import NativeWindowsReadOnlyApi
 CHANNEL = "Microsoft-Windows-GroupPolicy/Operational"
 NS = {"e": "http://schemas.microsoft.com/win/2004/08/events/event"}
 STARTS = {4000: 8000, 4002: 8002, 4004: 8004, 4006: 8006}
+# Microsoft의 사용자/컴퓨터 처리 종료 및 warning/error 분류:
+# https://devblogs.microsoft.com/scripting/weekend-scripter-use-powershell-to-troubleshoot-group-policy/
+# 실제 VM의 버전·필드는 아래 런타임 검사에서 별도로 확인한다.
+USER_STARTS = {4001: 8001, 4003: 8003, 4005: 8005, 4007: 8007}
+ALL_STARTS = {**STARTS, **USER_STARTS}
+FAILED_ENDS = frozenset({6000, 6001, 6002, 6003, 6004, 6005, 6006, 6007,
+                        7000, 7001, 7002, 7003, 7004, 7005, 7006, 7007})
 # 세션 증명에 실제로 사용하는 역할만 명시한다. 번호 대역과 IsMachine은
 # 세션 경계를 뜻하지 않으며 4117/5351 같은 일반 알림에도 나타날 수 있다.
-SESSION_EVENTS = frozenset({*STARTS, *STARTS.values(), 5117, 5126, 5312, 5313})
+SESSION_EVENTS = frozenset({*ALL_STARTS, *ALL_STARTS.values(), *FAILED_ENDS, 5117, 5126, 5312, 5313})
 SESSION_EVIDENCE_FIELDS = frozenset({
     "PolicyActivityId", "GPOInfoList", "NumberOfGPOsDownloaded", "NumberOfGPOsApplicable",
     "IsDomainJoined", "IsConnectivityFailure", "SessionTimeElapsedInMilliseconds",
@@ -127,6 +135,8 @@ def _validate(snapshot, context):
             fail("GPO_EVENT_OUTSIDE_CURRENT_BOOT")
         if row["level"] not in {0, 4, 5}:
             fail("GPO_WARNING_OR_ERROR")
+        if row["id"] in FAILED_ENDS:
+            fail("GPO_SESSION_FAILED")
         if "ErrorCode" in data and int(data["ErrorCode"], 0) != 0:
             fail("GPO_SESSION_FAILED")
         if row["id"] in {5117, 5126, 5312, 5313} and row["version"] != 0:
@@ -153,31 +163,50 @@ def _validate(snapshot, context):
         fail("GPO_EVENT_ORDER_INVALID")
     if rows[-1]["record"] != snapshot["after_record"]:
         fail("GPO_QUERY_INCOMPLETE")
-    starts = [r for r in rows if r["id"] in STARTS and machine(r)]
+    all_starts = [r for r in rows if r["id"] in ALL_STARTS]
+    for row in rows:
+        if row["id"] in ALL_STARTS or row["id"] in ALL_STARTS.values():
+            expected_machine = row["id"] in STARTS or row["id"] in STARTS.values()
+            if machine(row) != expected_machine:
+                fail("GPO_SESSION_SCOPE_MISMATCH")
+    starts = [r for r in all_starts if r["id"] in STARTS]
     if not starts or not any(r["id"] == 4000 for r in starts):
         fail("GPO_CURRENT_BOOT_START_MISSING")
-    if len({r["activity"] for r in starts}) != len(starts):
+    if len({r["activity"] for r in all_starts}) != len(all_starts):
         fail("GPO_SESSION_START_DUPLICATE")
-    activities = {r["activity"] for r in starts}
+    activities = {r["activity"]: machine(r) for r in all_starts}
     for row in rows:
-        if row["id"] in {*STARTS.values(), 5117, 5126} and machine(row) and row["activity"] not in activities:
-            fail("GPO_ORPHAN_MACHINE_EVENT")
-    # 모든 컴퓨터 시작 세션의 완료를 먼저 검사한다. 최신 정상 세션만 골라 실패를 숨기지 않는다.
-    for start in starts:
+        if row["id"] in {*ALL_STARTS.values(), 5117, 5126, 5312, 5313}:
+            if row["activity"] not in activities:
+                fail("GPO_ORPHAN_SESSION_EVENT")
+            if row["id"] not in {5312, 5313} and machine(row) != activities[row["activity"]]:
+                fail("GPO_SESSION_SCOPE_MISMATCH")
+    # 사용자 세션도 실패·미완료를 숨기지 않는다. 최신 컴퓨터 증거 선택은 별도로 한다.
+    for start in all_starts:
         context.update(stage="SESSION_COMPLETION", event_id=start["id"], record_id=start["record"])
         group = [r for r in rows if r["activity"] == start["activity"]]
-        end = [r for r in group if r["id"] == STARTS[start["id"]]]
+        end = [r for r in group if r["id"] == ALL_STARTS[start["id"]]]
         final = [r for r in group if r["id"] == 5117]
         if len(end) != 1 or len(final) != 1:
-            fail("GPO_MACHINE_SESSION_INCOMPLETE")
+            fail("GPO_MACHINE_SESSION_INCOMPLETE" if machine(start) else "GPO_USER_SESSION_INCOMPLETE")
         if not start["record"] < end[0]["record"] < final[0]["record"] or final[0] != group[-1]:
             fail("GPO_SESSION_ORDER_INVALID")
-        if not machine(end[0]) or not machine(final[0]) or int(end[0]["data"]["ErrorCode"], 0) != 0:
+        if (machine(end[0]) != machine(start) or machine(final[0]) != machine(start)
+                or int(end[0]["data"]["ErrorCode"], 0) != 0):
             fail("GPO_SESSION_FAILED")
         if start["data"]["IsDomainJoined"] != "false" or end[0]["data"]["IsConnectivityFailure"] != "false":
             fail("GPO_DOMAIN_OR_CONNECTIVITY_FAILURE")
         if str(UUID(start["data"]["PolicyActivityId"].strip("{}"))) != start["activity"]:
             fail("GPO_ACTIVITY_MISMATCH")
+        if not machine(start):
+            # 사용자 세션도 적용 정책이나 파싱 실패를 숨기지 않는다. 컴퓨터의
+            # 필수 6개 증거 검증은 아래에서 별도로 유지한다.
+            for row in group:
+                if row["id"] == 5126 and any(int(row["data"][key]) != 0 for key in (
+                        "NumberOfGPOsDownloaded", "NumberOfGPOsApplicable")):
+                    fail("GPO_USER_APPLIED_POLICY_FOUND")
+                if row["id"] == 5312 and row["data"]["GPOInfoList"].strip():
+                    fail("GPO_USER_APPLIED_POLICY_FOUND")
     latest = starts[-1]
     context.update(stage="LATEST_SESSION", event_id=latest["id"], record_id=latest["record"])
     group = [r for r in rows if r["activity"] == latest["activity"]]
@@ -206,11 +235,64 @@ def _validate(snapshot, context):
             or any(len(gpo.findall(key)) != 1 for key in ("SOM", "Version", "Reason"))):
         fail("GPO_LOCAL_POLICY_NOT_EMPTY")
     return {"boot_time": snapshot["boot_time"], "session_count": len(starts),
+            "user_session_count": len(all_starts) - len(starts),
             "activity_id": latest["activity"], "start_record": latest["record"],
             "end_record": selected[-1]["record"], "applied_gpo_count": 0}
 
 
-def collect():
+def event_inventory(snapshot):
+    """모든 이벤트의 ID/버전/필드 이름을 묶는다. 계정명·필드 값·XML은 반환하지 않는다.
+
+    검증 통과와 무관한 관측 목록이며 미지원 유형을 한 번에 찾기 위한 자료다.
+    """
+    entries = []
+    scopes = {}
+    for raw in snapshot.get("events", []):
+        try:
+            node = safe_xml(raw)
+            system = node.find("e:System", NS)
+            eid = int(system.findtext("e:EventID", namespaces=NS))
+            record = int(system.findtext("e:EventRecordID", namespaces=NS))
+            version = int(system.findtext("e:Version", namespaces=NS))
+            level = int(system.findtext("e:Level", namespaces=NS))
+            correlation = system.find("e:Correlation", NS)
+            activity = correlation.get("ActivityID", "") if correlation is not None else ""
+            fields = {f.get("Name"): f.text or "" for f in node.findall("e:EventData/e:Data", NS)}
+            row = {"id": eid, "data": fields}
+            try:
+                required = session_evidence(row)
+                role = "SESSION" if required else "GENERAL"
+                reason = None
+            except LiveDiagnosticError as exc:
+                role, reason = "UNSUPPORTED", exc.reason_code
+            if eid in ALL_STARTS or eid in ALL_STARTS.values():
+                role = "COMPUTER" if eid in STARTS or eid in STARTS.values() else "USER"
+                if eid in ALL_STARTS:
+                    scopes[activity] = role
+            entries.append({"event_id": eid, "version": version, "level": level,
+                            "record_id": record, "activity_present": bool(activity.strip()),
+                            "fields": sorted(k for k in fields if k), "role": role,
+                            "reason_code": reason, "_activity": activity})
+        except (LiveDiagnosticError, AttributeError, TypeError, ValueError, ET.ParseError) as exc:
+            entries.append({"role": "UNPARSEABLE", "exception_type": type(exc).__name__})
+    grouped = {}
+    for entry in entries:
+        activity = entry.pop("_activity", None)
+        if entry["role"] == "SESSION":
+            entry["role"] = scopes.get(activity, "UNRESOLVED_SESSION")
+        record = entry.pop("record_id", None)
+        key = json.dumps(entry, sort_keys=True)
+        if key not in grouped:
+            grouped[key] = {**entry, "count": 0, "first_record": record, "last_record": record}
+        group = grouped[key]
+        group["count"] += 1
+        if record is not None:
+            group["first_record"] = min(group["first_record"], record)
+            group["last_record"] = max(group["last_record"], record)
+    return list(grouped.values())
+
+
+def collect(*, detailed=False):
     # 고정 읽기 전용 조회. 설정 변경, 로그 활성화, gpupdate, 파일 입력은 없다.
     query = r"""
 $ErrorActionPreference = 'Stop'
@@ -240,6 +322,11 @@ ConvertTo-Json -InputObject $data -Depth 5 -Compress
         rows = NativeWindowsReadOnlyApi()._run_powershell_json(query)
         if len(rows) != 1:
             fail("GPO_LIVE_QUERY_INVALID")
+        if detailed:
+            # 실패 유형이 여럿이어도 목록 전체를 먼저 보여 준다. 이것은 PASS 판정이 아니다.
+            print("[GPO 이벤트 목록] 관측 전용; 안전성 검증 전")
+            for entry in event_inventory(rows[0]):
+                print(json.dumps(entry, ensure_ascii=True, sort_keys=True))
         return validate(rows[0])
     except LiveDiagnosticError:
         raise
@@ -251,8 +338,9 @@ ConvertTo-Json -InputObject $data -Depth 5 -Compress
 
 
 def diagnose():
-    result = collect()
+    result = collect(detailed=True)
     print(f"[라이브 GPO] boot={result['boot_time']} computer_sessions={result['session_count']} "
           f"ActivityID={result['activity_id']} records={result['start_record']}..{result['end_record']} "
+          f"user_sessions={result['user_session_count']} "
           "applied_gpo_count=0; 관측 PASS, History 예외 허용 아님")
     return result
