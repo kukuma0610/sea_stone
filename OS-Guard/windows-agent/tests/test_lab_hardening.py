@@ -117,7 +117,7 @@ class LabPolicyTests(unittest.TestCase):
         for state in ((1, 0, 0), (0, 1, 0)):
             with patch.object(winreg, "OpenKey"), patch.object(winreg, "QueryInfoKey", side_effect=[(0, 1, 0), state]), \
                     patch.object(winreg, "EnumValue", return_value=("PolicyOverdue", 0, winreg.REG_DWORD)), \
-                    patch.object(policy, "describe_gpo_list"), \
+                    patch.object(policy, "verified_empty_local_gpo_object", return_value=False), patch.object(policy, "describe_gpo_list"), \
                     self.subTest(state=state), self.assertRaises(policy.LabRejected):
                 policy.exact_history()
 

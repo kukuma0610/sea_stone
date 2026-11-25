@@ -244,6 +244,35 @@ def describe_gpo_list(winreg, key, info, *, depth=0, budget=None):
                 describe_gpo_list(winreg, child, winreg.QueryInfoKey(child), depth=depth+1, budget=budget)
 
 
+def verified_empty_local_gpo_object(winreg, key, info):
+    """LAB 전용: 실측한 로컬 객체의 정확한 구조만 인정한다. 적용 여부의 증거는 아니다."""
+    if info[:2] != (1, 0) or winreg.EnumKey(key, 0) != "0":
+        return False
+    expected = {
+        "Version": (0, winreg.REG_DWORD),
+        "WQLFilterPass": (1, winreg.REG_DWORD),
+        "AccessDenied": (0, winreg.REG_DWORD),
+        "GPO-Disabled": (0, winreg.REG_DWORD),
+        "Options": (0, winreg.REG_DWORD),
+        "GPOID": ("Local Group Policy", winreg.REG_SZ),
+        "SOM": ("Local", winreg.REG_SZ),
+        "DisplayName": ("Local Group Policy", winreg.REG_SZ),
+        "WQL-Id": ("", winreg.REG_SZ),
+    }
+    with winreg.OpenKey(key, "0", 0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as child:
+        before = winreg.QueryInfoKey(child)
+        if before[:2] != (0, len(expected)):
+            return False
+        actual = {}
+        for index in range(before[1]):
+            name, value, kind = winreg.EnumValue(child, index)
+            if name in actual or (kind == winreg.REG_DWORD and type(value) is not int):
+                return False
+            actual[name] = (value, kind)
+        require(winreg.QueryInfoKey(child) == before, "LAB_GPO_LIST_CHANGED_DURING_QUERY")
+        return actual == expected
+
+
 def verify_gpo_list_state(winreg, state):
     # OpenKey의 부재와 열거 중 삭제/조회 실패를 구분한다. 후자는 허용하지 않는다.
     try:
@@ -256,17 +285,18 @@ def verify_gpo_list_state(winreg, state):
         subkeys, values, _ = before
         empty = subkeys == 0 and values == 0
         # 기존 운영용 verify_no_policy_history()와 동일한 '빈 기본값' 의미만 허용한다.
-        # LocalGPO 하위 객체, 이름 있는 값, DWORD 0 등을 자동 미적용으로 해석하지 않는다.
+        # 로컬 객체만으로 미적용을 추론하지 않는다. environment()의 독립 검사가 필수다.
         empty_default = (subkeys == 0 and values == 1
                          and winreg.EnumValue(key, 0) == ("", "", winreg.REG_SZ))
-        if not (empty or empty_default):
+        local_only = verified_empty_local_gpo_object(winreg, key, before)
+        if not (empty or empty_default or local_only):
             try:
                 describe_gpo_list(winreg, key, before)
             except Exception as exc:
                 print(f"[LAB GPO-List] diagnostic failed: {type(exc).__name__}; 차단 유지")
             raise LabRejected("LAB_GPO_LIST_NOT_EMPTY")
         require(winreg.QueryInfoKey(key) == before, "LAB_GPO_LIST_CHANGED_DURING_QUERY")
-        print(f"[LAB GPO-List] verified empty; empty_default={empty_default}; 실제 적용 여부는 별도 라이브/RSOP/파일 검사")
+        print(f"[LAB GPO-List] empty_default={empty_default}; exact_local_object={local_only}; 실제 적용 여부는 별도 라이브/RSOP/파일 검사")
 
 
 def exact_history():
