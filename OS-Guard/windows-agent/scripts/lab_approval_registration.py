@@ -150,6 +150,8 @@ def register(code, snapshot_id, *, evidence_kind="NATIVE_WINDOWS_LOGON"):
     print(f"Set-Location -LiteralPath '{quoted_root}'")
     print(f"python scripts/lab_hardening_e2e.py --code {code} --approval-file '{quoted}'")
     print("위 사전 검증 통과 후에만 같은 명령에 --execute를 추가하십시오. 기존 실행 승인 절차는 그대로 적용됩니다.")
+    print(f"python scripts/lab_hardening_e2e.py --code {code} --approval-file '{quoted}' --execute")
+    print("항목 종료 후 집계(실패·원복 미확인 시 다음 항목 중단): python scripts/lab_e2e_report.py")
     return target
 
 

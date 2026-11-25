@@ -177,12 +177,18 @@ class LabRunnerTests(unittest.TestCase):
                 before = capture()
                 self.assertEqual(lab.run(record(code), "digest", lambda: None, evidence_kind="MOCK_UNIT_TEST"), 0)
                 self.assertEqual(capture(), before)
-                result = json.loads(next((folder / "results/lab-hardening").glob("*.result.json")).read_text())
+                result = json.loads(next((folder / "results/lab-hardening").glob("*.result.json")).read_text(encoding="utf-8"))
                 self.assertEqual(result["status"], "PASS")
                 self.assertTrue(result["test_policy_used"])
                 self.assertFalse(result["central_approved"])
                 self.assertEqual(result["execution_kind"], "MOCK_UNIT_TEST")
                 self.assertEqual(result["stages"]["original_restore"], "PASS")
+                self.assertEqual(result["prepared_check_status"], "FAIL")
+                self.assertEqual(result["after_check_status"], "PASS")
+                self.assertEqual(result["rollback_check_status"], "FAIL")
+                self.assertEqual(result["original_check_status"], result["restored_check_status"])
+                self.assertTrue(result["item_name"])
+                self.assertTrue(list((folder/"results/lab-hardening").glob("*.console.log")))
                 self.assertFalse((folder / "results/lab-hardening/ACTIVE_OR_RECOVERY_REQUIRED").exists())
 
     def test_partial_preparation_failure_restores_original(self):
@@ -224,7 +230,7 @@ class LabRunnerTests(unittest.TestCase):
             with patch.object(script, "HardeningRunner", side_effect=failed_recheck):
                 self.assertEqual(lab.run(record(), "digest", lambda: None, evidence_kind="MOCK_UNIT_TEST"), 1)
             self.assertEqual(capture(), before)
-            result = json.loads(next((folder/"results/lab-hardening").glob("*.result.json")).read_text())
+            result = json.loads(next((folder/"results/lab-hardening").glob("*.result.json")).read_text(encoding="utf-8"))
             self.assertEqual(result["status"], "FAIL")
 
     def test_original_restore_failure_holds_global_lock_for_next_code(self):
