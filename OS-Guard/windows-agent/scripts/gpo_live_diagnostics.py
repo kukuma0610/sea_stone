@@ -73,6 +73,42 @@ def machine(row):
     fail("GPO_EVENT_VERSION_UNSUPPORTED")
 
 
+def policy_evidence(start, group, context):
+    """같은 ActivityID의 6개 독립 증거를 검증한다. 5126 플래그로 세션을 재분류하지 않는다."""
+    expected = [start["id"], 5126, 5312, 5313, ALL_STARTS[start["id"]], 5117]
+    selected = []
+    for event_id in expected:
+        matches = [r for r in group if r["id"] == event_id]
+        if len(matches) != 1:
+            fail("GPO_REQUIRED_EVENT_MISSING_OR_DUPLICATE")
+        selected.append(matches[0])
+    if selected != sorted(selected, key=lambda row: row["record"]):
+        fail("GPO_REQUIRED_EVENT_ORDER_INVALID")
+    count, applied, excluded = selected[1:4]
+    context.update(stage="APPLIED_GPO_VALIDATION", event_id=count["id"], record_id=count["record"])
+    if any(row["version"] != 0 for row in (count, applied, excluded, selected[-1])):
+        fail("GPO_EVENT_VERSION_UNSUPPORTED")
+    # Version=0 Template의 Boolean 형식은 검증한다. 세션 소속은 ActivityID와
+    # 시작/종료/5117의 일치로 확정하며 이 다운로드 단계 플래그에서 유추하지 않는다.
+    count_flag = machine(count)
+    if machine(start) and not count_flag:
+        # 현재 확인된 컴퓨터 5126 계약은 유지한다. 관측되지 않은 반대 방향의
+        # 플래그 모순까지 이번 사용자 세션 호환성 수정으로 확대 허용하지 않는다.
+        fail("GPO_SESSION_SCOPE_MISMATCH")
+    reason = "GPO_APPLIED_POLICY_FOUND" if machine(start) else "GPO_USER_APPLIED_POLICY_FOUND"
+    if any(int(count["data"][key]) != 0 for key in ("NumberOfGPOsDownloaded", "NumberOfGPOsApplicable")):
+        fail(reason)
+    if applied["data"]["GPOInfoList"].strip():
+        fail(reason)
+    context.update(stage="LOCAL_GPO_XML", event_id=excluded["id"], record_id=excluded["record"])
+    gpo = safe_xml(excluded["data"]["GPOInfoList"])
+    if (gpo.tag != "GPO" or gpo.findtext("SOM") != "Local" or gpo.findtext("Version") != "0"
+            or gpo.findtext("Reason") != "NOTAPPLIED-EMPTY" or gpo.findall(".//GPO")
+            or any(len(gpo.findall(key)) != 1 for key in ("SOM", "Version", "Reason"))):
+        fail("GPO_LOCAL_POLICY_NOT_EMPTY")
+    return selected, count_flag != machine(start)
+
+
 def validate(snapshot):
     """라이브 수집 결과 검증. RecordID 간격을 로그 삭제로 해석하지 않는다."""
     context = {"stage": "SNAPSHOT_HEADER", "event_id": None, "record_id": None}
@@ -165,6 +201,7 @@ def _validate(snapshot, context):
         fail("GPO_QUERY_INCOMPLETE")
     all_starts = [r for r in rows if r["id"] in ALL_STARTS]
     for row in rows:
+        context.update(stage="SESSION_SCOPE", event_id=row["id"], record_id=row["record"])
         if row["id"] in ALL_STARTS or row["id"] in ALL_STARTS.values():
             expected_machine = row["id"] in STARTS or row["id"] in STARTS.values()
             if machine(row) != expected_machine:
@@ -176,12 +213,16 @@ def _validate(snapshot, context):
         fail("GPO_SESSION_START_DUPLICATE")
     activities = {r["activity"]: machine(r) for r in all_starts}
     for row in rows:
+        context.update(stage="SESSION_SCOPE", event_id=row["id"], record_id=row["record"])
         if row["id"] in {*ALL_STARTS.values(), 5117, 5126, 5312, 5313}:
             if row["activity"] not in activities:
                 fail("GPO_ORPHAN_SESSION_EVENT")
-            if row["id"] not in {5312, 5313} and machine(row) != activities[row["activity"]]:
+            if row["id"] == 5126:
+                machine(row)  # 형식만 검사. 같은 ActivityID의 독립 정책 증거는 아래에서 모두 검사한다.
+            elif row["id"] not in {5312, 5313} and machine(row) != activities[row["activity"]]:
                 fail("GPO_SESSION_SCOPE_MISMATCH")
     # 사용자 세션도 실패·미완료를 숨기지 않는다. 최신 컴퓨터 증거 선택은 별도로 한다.
+    count_flag_differences = []
     for start in all_starts:
         context.update(stage="SESSION_COMPLETION", event_id=start["id"], record_id=start["record"])
         group = [r for r in rows if r["activity"] == start["activity"]]
@@ -199,43 +240,17 @@ def _validate(snapshot, context):
         if str(UUID(start["data"]["PolicyActivityId"].strip("{}"))) != start["activity"]:
             fail("GPO_ACTIVITY_MISMATCH")
         if not machine(start):
-            # 사용자 세션도 적용 정책이나 파싱 실패를 숨기지 않는다. 컴퓨터의
-            # 필수 6개 증거 검증은 아래에서 별도로 유지한다.
-            for row in group:
-                if row["id"] == 5126 and any(int(row["data"][key]) != 0 for key in (
-                        "NumberOfGPOsDownloaded", "NumberOfGPOsApplicable")):
-                    fail("GPO_USER_APPLIED_POLICY_FOUND")
-                if row["id"] == 5312 and row["data"]["GPOInfoList"].strip():
-                    fail("GPO_USER_APPLIED_POLICY_FOUND")
+            _, different = policy_evidence(start, group, context)
+            if different:
+                count_flag_differences.append({"event_id": 5126,
+                    "record_id": next(r["record"] for r in group if r["id"] == 5126), "scope": "USER"})
     latest = starts[-1]
     context.update(stage="LATEST_SESSION", event_id=latest["id"], record_id=latest["record"])
     group = [r for r in rows if r["activity"] == latest["activity"]]
-    expected = [latest["id"], 5126, 5312, 5313, STARTS[latest["id"]], 5117]
-    selected = []
-    for event_id in expected:
-        matches = [r for r in group if r["id"] == event_id]
-        if len(matches) != 1:
-            fail("GPO_REQUIRED_EVENT_MISSING_OR_DUPLICATE")
-        selected.append(matches[0])
-    if selected != sorted(selected, key=lambda row: row["record"]):
-        fail("GPO_REQUIRED_EVENT_ORDER_INVALID")
-    count, applied, excluded = selected[1:4]
-    context["stage"] = "APPLIED_GPO_VALIDATION"
-    if any(row["version"] != 0 for row in (count, applied, excluded, selected[-1])):
-        fail("GPO_EVENT_VERSION_UNSUPPORTED")
-    if not machine(count) or any(int(count["data"][key]) != 0 for key in ("NumberOfGPOsDownloaded", "NumberOfGPOsApplicable")):
-        fail("GPO_APPLIED_POLICY_FOUND")
-    if applied["data"]["GPOInfoList"].strip():
-        fail("GPO_APPLIED_POLICY_FOUND")
-    context.update(stage="LOCAL_GPO_XML", event_id=excluded["id"], record_id=excluded["record"])
-    gpo = safe_xml(excluded["data"]["GPOInfoList"])
-    # 번역된 Name/DescriptionString은 판단에 사용하지 않는다.
-    if (gpo.tag != "GPO" or gpo.findtext("SOM") != "Local" or gpo.findtext("Version") != "0"
-            or gpo.findtext("Reason") != "NOTAPPLIED-EMPTY" or gpo.findall(".//GPO")
-            or any(len(gpo.findall(key)) != 1 for key in ("SOM", "Version", "Reason"))):
-        fail("GPO_LOCAL_POLICY_NOT_EMPTY")
+    selected, _ = policy_evidence(latest, group, context)
     return {"boot_time": snapshot["boot_time"], "session_count": len(starts),
             "user_session_count": len(all_starts) - len(starts),
+            "count_flag_differences": count_flag_differences,
             "activity_id": latest["activity"], "start_record": latest["record"],
             "end_record": selected[-1]["record"], "applied_gpo_count": 0}
 
@@ -342,6 +357,9 @@ ConvertTo-Json -InputObject $data -Depth 5 -Compress
 
 def diagnose():
     result = collect(detailed=True)
+    for entry in result["count_flag_differences"]:
+        print("[GPO 5126 플래그 관측] " + json.dumps(entry, sort_keys=True)
+              + "; ActivityID 및 독립 정책 증거 검증, 플래그 의미는 미확정")
     print(f"[라이브 GPO] boot={result['boot_time']} computer_sessions={result['session_count']} "
           f"ActivityID={result['activity_id']} records={result['start_record']}..{result['end_record']} "
           f"user_sessions={result['user_session_count']} "

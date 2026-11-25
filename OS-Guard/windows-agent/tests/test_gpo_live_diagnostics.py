@@ -46,7 +46,7 @@ def with_user_session(start=4001, version=1):
     data["events"].extend([
         event(start, 30, {"PolicyActivityId": activity, "IsMachine": flag,
                           "IsDomainJoined": "false"}, version, activity),
-        event(5126, 31, {"IsMachine": "false", "NumberOfGPOsDownloaded": 0,
+        event(5126, 31, {"IsMachine": "true", "NumberOfGPOsDownloaded": 0,
                           "NumberOfGPOsApplicable": 0}, activity=activity),
         event(5312, 32, {"GPOInfoList": ""}, activity=activity),
         event(5313, 33, {"GPOInfoList": '<GPO><Version>0</Version><SOM>Local</SOM><Reason>NOTAPPLIED-EMPTY</Reason></GPO>'}, activity=activity),
@@ -60,6 +60,57 @@ def with_user_session(start=4001, version=1):
 
 
 class LiveGpoTests(unittest.TestCase):
+    def test_vm_user_5126_true_uses_activity_and_independent_zero_policy_evidence(self):
+        data = with_user_session()
+        for index, record in enumerate((1984, 1990, 1991, 1992, 1996, 1997), 6):
+            node = ET.fromstring(data["events"][index])
+            node.find("e:System/e:EventRecordID", live.NS).text = str(record)
+            data["events"][index] = ET.tostring(node, encoding="unicode")
+        data.update(before_record=1997, after_record=1997)
+        result = live.validate(data)
+        self.assertEqual(result["count_flag_differences"], [{"event_id": 5126,
+                          "record_id": 1990, "scope": "USER"}])
+        self.assertEqual(result["end_record"], 21)
+        self.assertEqual(result["applied_gpo_count"], 0)
+        self.assertEqual(result["user_session_count"], 1)
+
+    def test_user_count_flag_false_is_valid_and_invalid_or_unknown_version_fails(self):
+        data = with_user_session()
+        data["events"][7] = data["events"][7].replace('<Data Name="IsMachine">true', '<Data Name="IsMachine">false')
+        self.assertEqual(live.validate(data)["count_flag_differences"], [])
+        for old, new in (('<Data Name="IsMachine">true', '<Data Name="IsMachine">unknown'),
+                         ('<Version>0</Version>', '<Version>1</Version>')):
+            data = with_user_session()
+            data["events"][7] = data["events"][7].replace(old, new)
+            with self.subTest(old=old), self.assertRaises(live.LiveDiagnosticError): live.validate(data)
+
+    def test_count_flag_difference_cannot_hide_missing_duplicate_or_wrong_activity(self):
+        for kind in ("missing", "duplicate", "activity", "excluded"):
+            data = with_user_session()
+            if kind == "missing": data["events"].pop(8)
+            elif kind == "duplicate":
+                data["events"].insert(8, data["events"][7].replace('<EventRecordID>31', '<EventRecordID>36'))
+                data.update(before_record=36, after_record=36)
+            elif kind == "activity":
+                data["events"][7] = data["events"][7].replace(
+                    "{11111111-1111-1111-1111-111111111111}", ACTIVITY)
+            else: data["events"][9] = data["events"][9].replace("NOTAPPLIED-EMPTY", "DENIED")
+            with self.subTest(kind=kind), self.assertRaises(live.LiveDiagnosticError): live.validate(data)
+
+    def test_boundary_scope_disagreement_still_reports_exact_event(self):
+        data = with_user_session()
+        data["events"][-2] = data["events"][-2].replace('<Data Name="IsMachine">0', '<Data Name="IsMachine">1')
+        with self.assertRaises(live.LiveDiagnosticError) as caught: live.validate(data)
+        self.assertEqual(caught.exception.reason_code, "GPO_SESSION_SCOPE_MISMATCH")
+        self.assertEqual(caught.exception.diagnostic["event_id"], 8001)
+        self.assertEqual(caught.exception.diagnostic["record_id"], 34)
+
+    def test_unverified_computer_count_flag_conflict_stays_blocked(self):
+        data = snapshot()
+        data["events"][1] = data["events"][1].replace('<Data Name="IsMachine">true', '<Data Name="IsMachine">false')
+        with self.assertRaises(live.LiveDiagnosticError) as caught: live.validate(data)
+        self.assertEqual(caught.exception.reason_code, "GPO_SESSION_SCOPE_MISMATCH")
+
     def test_reported_49_events_22_ids_are_not_classified_by_id_ranges(self):
         # ID/개수와 이미 제공된 필드만 재현한다. 미제공 원본 XML을 대신하지 않는다.
         counts = {4000: 1, 4001: 1, 4115: 1, 4116: 1, 4117: 2, 4126: 2,
