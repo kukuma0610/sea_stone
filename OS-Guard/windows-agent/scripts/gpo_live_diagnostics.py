@@ -50,15 +50,20 @@ def machine(row):
 
 def validate(snapshot):
     """라이브 수집 결과 검증. RecordID 간격을 로그 삭제로 해석하지 않는다."""
+    context = {"stage": "SNAPSHOT_HEADER", "event_id": None, "record_id": None}
     try:
-        return _validate(snapshot)
-    except LiveDiagnosticError:
+        return _validate(snapshot, context)
+    except LiveDiagnosticError as exc:
+        exc.diagnostic = {**context, "exception_type": type(exc).__name__}
         raise
-    except (KeyError, TypeError, ValueError, AttributeError, ET.ParseError):
-        fail("GPO_SNAPSHOT_INVALID")
+    except (KeyError, TypeError, ValueError, AttributeError, ET.ParseError) as cause:
+        exc = LiveDiagnosticError("GPO_SNAPSHOT_INVALID")
+        # 예외·이벤트 원문은 출력하지 않고, 식별자는 파싱된 정수만 남긴다.
+        exc.diagnostic = {**context, "exception_type": type(cause).__name__}
+        raise exc from None
 
 
-def _validate(snapshot):
+def _validate(snapshot, context):
     boot, observed = date(snapshot["boot_time"]), date(snapshot["observed_at"])
     if boot > observed or snapshot["log_enabled"] is not True:
         fail("GPO_LOG_UNAVAILABLE")
@@ -73,25 +78,44 @@ def _validate(snapshot):
         fail("GPO_EVENTS_MISSING")
     rows = []
     for raw in source:
+        context.update(stage="EVENT_XML", event_id=None, record_id=None)
         node = safe_xml(raw)
         system = node.find("e:System", NS)
+        context["stage"] = "EVENT_IDENTITY"
+        context["event_id"] = int(system.findtext("e:EventID", namespaces=NS))
+        context["record_id"] = int(system.findtext("e:EventRecordID", namespaces=NS))
+        context["stage"] = "EVENT_PROVIDER"
         provider = system.find("e:Provider", NS)
         if (provider.get("Name") != "Microsoft-Windows-GroupPolicy"
                 or provider.get("Guid", "").lower() != "{aea1b4fa-97d1-45f2-a64c-4d69fffd92c9}"
                 or system.findtext("e:Channel", namespaces=NS) != CHANNEL):
             fail("GPO_PROVIDER_MISMATCH")
         data = {}
+        context["stage"] = "EVENT_DATA"
         for field in node.findall("e:EventData/e:Data", NS):
             name = field.get("Name")
             if not name or name in data:
                 fail("GPO_DUPLICATE_FIELD")
             data[name] = field.text or ""
-        row = {"id": int(system.findtext("e:EventID", namespaces=NS)),
+        context["stage"] = "EVENT_FIELDS"
+        row = {"id": context["event_id"],
                "version": int(system.findtext("e:Version", namespaces=NS)),
-               "record": int(system.findtext("e:EventRecordID", namespaces=NS)),
+               "record": context["record_id"],
                "time": date(system.find("e:TimeCreated", NS).get("SystemTime")),
                "level": int(system.findtext("e:Level", namespaces=NS)), "data": data}
-        row["activity"] = str(UUID(system.find("e:Correlation", NS).get("ActivityID").strip("{}")))
+        context["stage"] = "EVENT_ACTIVITY"
+        correlation = system.find("e:Correlation", NS)
+        activity = correlation.get("ActivityID") if correlation is not None else None
+        if not activity or not activity.strip():
+            # 필수 세션 이벤트는 상관관계 없이는 검증할 수 없다. 다른 정보 이벤트도
+            # 독립 이벤트라는 원문 근거가 없으면 임의로 버리지 않고 차단한다.
+            required = row["id"] in {*STARTS, *STARTS.values(), 5117, 5126, 5312, 5313}
+            fail("GPO_ACTIVITY_MISSING" if required else "GPO_UNCORRELATED_EVENT")
+        try:
+            row["activity"] = str(UUID(activity.strip("{}")))
+        except ValueError:
+            fail("GPO_ACTIVITY_INVALID")
+        context["stage"] = "EVENT_SAFETY"
         if not boot <= row["time"] <= observed:
             fail("GPO_EVENT_OUTSIDE_CURRENT_BOOT")
         if row["level"] not in {0, 4, 5}:
@@ -101,6 +125,7 @@ def _validate(snapshot):
         if row["id"] in {5117, 5126, 5312, 5313} and row["version"] != 0:
             fail("GPO_EVENT_VERSION_UNSUPPORTED")
         rows.append(row)
+    context.update(stage="SESSION_SELECTION", event_id=None, record_id=None)
     rows.sort(key=lambda row: row["record"])
     if len({r["record"] for r in rows}) != len(rows) or any(a["time"] > b["time"] for a, b in zip(rows, rows[1:])):
         fail("GPO_EVENT_ORDER_INVALID")
@@ -117,6 +142,7 @@ def _validate(snapshot):
             fail("GPO_ORPHAN_MACHINE_EVENT")
     # 모든 컴퓨터 시작 세션의 완료를 먼저 검사한다. 최신 정상 세션만 골라 실패를 숨기지 않는다.
     for start in starts:
+        context.update(stage="SESSION_COMPLETION", event_id=start["id"], record_id=start["record"])
         group = [r for r in rows if r["activity"] == start["activity"]]
         end = [r for r in group if r["id"] == STARTS[start["id"]]]
         final = [r for r in group if r["id"] == 5117]
@@ -131,6 +157,7 @@ def _validate(snapshot):
         if str(UUID(start["data"]["PolicyActivityId"].strip("{}"))) != start["activity"]:
             fail("GPO_ACTIVITY_MISMATCH")
     latest = starts[-1]
+    context.update(stage="LATEST_SESSION", event_id=latest["id"], record_id=latest["record"])
     group = [r for r in rows if r["activity"] == latest["activity"]]
     expected = [latest["id"], 5126, 5312, 5313, STARTS[latest["id"]], 5117]
     selected = []
@@ -142,12 +169,14 @@ def _validate(snapshot):
     if selected != sorted(selected, key=lambda row: row["record"]):
         fail("GPO_REQUIRED_EVENT_ORDER_INVALID")
     count, applied, excluded = selected[1:4]
+    context["stage"] = "APPLIED_GPO_VALIDATION"
     if any(row["version"] != 0 for row in (count, applied, excluded, selected[-1])):
         fail("GPO_EVENT_VERSION_UNSUPPORTED")
     if not machine(count) or any(int(count["data"][key]) != 0 for key in ("NumberOfGPOsDownloaded", "NumberOfGPOsApplicable")):
         fail("GPO_APPLIED_POLICY_FOUND")
     if applied["data"]["GPOInfoList"].strip():
         fail("GPO_APPLIED_POLICY_FOUND")
+    context.update(stage="LOCAL_GPO_XML", event_id=excluded["id"], record_id=excluded["record"])
     gpo = safe_xml(excluded["data"]["GPOInfoList"])
     # 번역된 Name/DescriptionString은 판단에 사용하지 않는다.
     if (gpo.tag != "GPO" or gpo.findtext("SOM") != "Local" or gpo.findtext("Version") != "0"
@@ -192,8 +221,11 @@ ConvertTo-Json -InputObject $data -Depth 5 -Compress
         return validate(rows[0])
     except LiveDiagnosticError:
         raise
-    except Exception:
-        fail("GPO_LIVE_QUERY_FAILED")
+    except Exception as cause:
+        exc = LiveDiagnosticError("GPO_LIVE_QUERY_FAILED")
+        exc.diagnostic = {"stage": "LIVE_QUERY", "event_id": None, "record_id": None,
+                          "exception_type": type(cause).__name__}
+        raise exc from None
 
 
 def diagnose():

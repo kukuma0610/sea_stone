@@ -40,6 +40,62 @@ def snapshot():
 
 
 class LiveGpoTests(unittest.TestCase):
+    def test_missing_activity_is_classified_not_attribute_error(self):
+        for event_id, expected in ((5312, "GPO_ACTIVITY_MISSING"),
+                                   (5320, "GPO_UNCORRELATED_EVENT")):
+            for correlation in ("", "<Correlation />", '<Correlation ActivityID="" />'):
+                data = snapshot()
+                raw = event(event_id, 19, {"InfoDescription": "secret-not-for-output"})
+                data["events"].insert(4, raw.replace(
+                    f'<Correlation ActivityID="{ACTIVITY}" />', correlation))
+                with self.subTest(event_id=event_id, correlation=correlation):
+                    with self.assertRaises(live.LiveDiagnosticError) as caught:
+                        live.validate(data)
+                    self.assertEqual(caught.exception.reason_code, expected)
+                    self.assertEqual(caught.exception.diagnostic["event_id"], event_id)
+                    self.assertEqual(caught.exception.diagnostic["record_id"], 19)
+                    self.assertEqual(caught.exception.diagnostic["stage"], "EVENT_ACTIVITY")
+
+    def test_invalid_activity_and_parser_exception_have_safe_context(self):
+        for old, new, reason, stage, kind in (
+            (ACTIVITY, "not-a-guid", "GPO_ACTIVITY_INVALID", "EVENT_ACTIVITY", "LiveDiagnosticError"),
+            ("<Version>1</Version>", "<Version>private-token</Version>",
+             "GPO_SNAPSHOT_INVALID", "EVENT_FIELDS", "ValueError")):
+            data = snapshot()
+            data["events"][0] = data["events"][0].replace(old, new)
+            with self.subTest(stage=stage), self.assertRaises(live.LiveDiagnosticError) as caught:
+                live.validate(data)
+            self.assertEqual(caught.exception.reason_code, reason)
+            self.assertEqual(caught.exception.diagnostic["stage"], stage)
+            self.assertEqual(caught.exception.diagnostic["exception_type"], kind)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                script.report_environment_exception(caught.exception, "ENVIRONMENT_CHECK_FAILED", "ENVIRONMENT")
+            self.assertIn("event_id=4000 record_id=10", output.getvalue())
+            self.assertNotIn("private-token", output.getvalue())
+
+    def test_malformed_xml_and_header_report_stage_without_event_payload(self):
+        for data, stage in (({**snapshot(), "events": ["<broken"]}, "EVENT_XML"),
+                            ({**snapshot(), "boot_time": None}, "SNAPSHOT_HEADER")):
+            with self.subTest(stage=stage), self.assertRaises(live.LiveDiagnosticError) as caught:
+                live.validate(data)
+            self.assertEqual(caught.exception.reason_code, "GPO_SNAPSHOT_INVALID")
+            self.assertEqual(caught.exception.diagnostic["stage"], stage)
+
+    def test_correlated_information_event_preserves_session_validation(self):
+        data = snapshot()
+        data["events"].insert(4, event(5320, 19, {"InfoDescription": "information"}))
+        self.assertEqual(live.validate(data)["applied_gpo_count"], 0)
+
+    def test_live_query_exception_does_not_expose_message(self):
+        with patch.object(live, "NativeWindowsReadOnlyApi") as api:
+            api.return_value._run_powershell_json.side_effect = OSError("private-token")
+            with self.assertRaises(live.LiveDiagnosticError) as caught:
+                live.collect()
+        self.assertEqual(caught.exception.diagnostic["stage"], "LIVE_QUERY")
+        self.assertEqual(caught.exception.diagnostic["exception_type"], "OSError")
+        self.assertNotIn("private-token", str(caught.exception))
+
     def test_verified_zero_gpos_and_record_gaps_are_valid(self):
         result = live.validate(snapshot())
         self.assertEqual(result["applied_gpo_count"], 0)

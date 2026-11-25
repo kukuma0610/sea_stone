@@ -40,6 +40,12 @@ def report_environment_exception(exc, reason_code, location):
     print(f"[환경 실패] reason_code={getattr(exc, 'reason_code', reason_code)} "
           f"location={getattr(exc, 'location', location)} "
           f"exception={type(exc).__name__} message={exc}")
+    diagnostic = getattr(exc, "diagnostic", None)
+    if isinstance(diagnostic, dict):
+        # 라이브 파서가 만든 고정 단계·정수 식별자·예외 유형만 출력한다.
+        print("[GPO 파서] " + " ".join(
+            f"{key}={diagnostic.get(key)}"
+            for key in ("stage", "event_id", "record_id", "exception_type")))
 
 
 def collect_environment():
