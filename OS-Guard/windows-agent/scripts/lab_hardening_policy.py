@@ -1,8 +1,8 @@
 """LAB-E2E-1: 격리 VM의 단일 시험에만 적용하는 위험 수용 정책.
 
 PolicyOverdue의 의미를 확정하지 않는다. 운영 검사는 수정하지 않으며, 책임자가
-발급한 승인 기록을 현장 관리자가 확인하는 로컬 시험 절차다. Central 승인이나
-전자서명/외부 역할 인증을 구현한 것으로 간주하지 않는다.
+발급한 승인 기록을 현장 관리자가 확인하는 로컬 시험 절차다. 기존 SID 기록 방식과
+별도 신뢰 확인된 인증서의 CMS 방식은 구분하며, 어느 쪽도 Central 승인은 아니다.
 """
 
 from datetime import datetime, timezone, timedelta
@@ -25,6 +25,12 @@ RISK = "POLICY_OVERDUE_MEANING_UNVERIFIED"
 
 class LabRejected(ValueError):
     pass
+
+
+class ApprovalFieldsRejected(LabRejected):
+    def __init__(self, issues):
+        self.issues = issues
+        super().__init__("APPROVAL_FIELDS_INVALID")
 
 
 def require(condition, reason):
@@ -73,7 +79,94 @@ def source_commit():
     return commit
 
 
-def validate_approval(data, *, code, vm, commit, now=None):
+def approval_field_issues(data):
+    """파싱 실패는 경로·사유만 반환한다. 입력값/승인자 이름/SID는 출력하지 않는다."""
+    issues = []
+    if not isinstance(data, dict):
+        return [("$", "OBJECT_REQUIRED")]
+    expected = {"policy_version", "approval_id", "vm_uuid", "commit", "code", "max_uses",
+                "issued_at", "expires_at", "isolated_vm", "no_operating_data_or_credentials",
+                "risk", "snapshot", "approvers"}
+    issues.extend((field, "FIELD_REQUIRED") for field in sorted(expected-set(data)))
+    if set(data)-expected:
+        issues.append(("$", "UNSUPPORTED_FIELDS"))
+    for field in ("approval_id", "vm_uuid"):
+        try:
+            UUID(data.get(field))
+        except (ValueError, TypeError, AttributeError):
+            issues.append((field, "UUID_REQUIRED"))
+    if not isinstance(data.get("commit"), str) or not re.fullmatch(r"[0-9a-f]{40}", data["commit"]):
+        issues.append(("commit", "FULL_GIT_COMMIT_REQUIRED"))
+    for field in ("issued_at", "expires_at"):
+        try:
+            utc(data.get(field))
+        except (ValueError, TypeError, AttributeError):
+            issues.append((field, "ISO8601_WITH_TIMEZONE_REQUIRED"))
+    for field in ("isolated_vm", "no_operating_data_or_credentials"):
+        if data.get(field) is not True:
+            issues.append((field, "ATTESTATION_REQUIRED"))
+    snapshot = data.get("snapshot")
+    if not isinstance(snapshot, dict):
+        issues.append(("snapshot", "OBJECT_REQUIRED"))
+    else:
+        for field in ("id", "recovery_procedure"):
+            if not isinstance(snapshot.get(field), str) or not snapshot[field].strip():
+                issues.append(("snapshot."+field, "TEXT_REQUIRED"))
+        if snapshot.get("confirmed") is not True:
+            issues.append(("snapshot.confirmed", "SNAPSHOT_ATTESTATION_REQUIRED"))
+    approvals = data.get("approvers")
+    if not isinstance(approvals, list) or len(approvals) != 2:
+        issues.append(("approvers", "TWO_APPROVALS_REQUIRED"))
+    else:
+        for index, approval in enumerate(approvals):
+            prefix = f"approvers[{index}]"
+            if not isinstance(approval, dict):
+                issues.append((prefix, "OBJECT_REQUIRED"))
+                continue
+            try:
+                utc(approval.get("approved_at"))
+            except (ValueError, TypeError, AttributeError):
+                issues.append((prefix+".approved_at", "ISO8601_WITH_TIMEZONE_REQUIRED"))
+            if approval.get("accepted") is not True:
+                issues.append((prefix+".accepted", "EXPLICIT_RISK_APPROVAL_REQUIRED"))
+            if not isinstance(approval.get("reference"), str) or not approval["reference"].strip():
+                issues.append((prefix+".reference", "ACTUAL_APPROVAL_REFERENCE_REQUIRED"))
+            if approval.get("method") == "DETACHED_CMS_SHA256":
+                for field in ("document_file", "signature_file"):
+                    if not isinstance(approval.get(field), str) or not approval[field].strip():
+                        issues.append((prefix+"."+field, "EVIDENCE_FILE_REQUIRED"))
+                if not isinstance(approval.get("document_sha256"), str) or not re.fullmatch(r"[0-9a-fA-F]{64}", approval["document_sha256"]):
+                    issues.append((prefix+".document_sha256", "SHA256_REQUIRED"))
+            else:
+                if not isinstance(approval.get("sid"), str) or not re.fullmatch(r"S-1-\d+(?:-\d+)+", approval["sid"]):
+                    issues.append((prefix+".sid", "WINDOWS_SID_OR_EXTERNAL_SIGNATURE_REQUIRED"))
+    return issues
+
+
+def validate_approval(data, *, code, vm, commit, now=None, external_proof=None):
+    issues = approval_field_issues(data)
+    if issues:
+        raise ApprovalFieldsRejected(issues)
+    try:
+        return _validate_approval(data, code=code, vm=vm, commit=commit, now=now, external_proof=external_proof)
+    except ApprovalFieldsRejected:
+        raise
+    except LabRejected as exc:
+        field = {"VM_BINDING_MISMATCH": "vm_uuid", "COMMIT_BINDING_MISMATCH": "commit",
+                 "RISK_NOT_ACKNOWLEDGED": "risk/policy_version",
+                 "CODE_BINDING_MISMATCH": "code", "SINGLE_USE_REQUIRED": "max_uses",
+                 "APPROVAL_EXPIRED_OR_INVALID": "issued_at/expires_at",
+                 "SNAPSHOT_NOT_ATTESTED": "snapshot", "SNAPSHOT_RECORD_INVALID": "snapshot",
+                 "ADMINISTRATOR_BINDING_MISMATCH": "approvers.ADMINISTRATOR.sid",
+                 "DISTINCT_APPROVERS_REQUIRED": "approvers", "RISK_APPROVAL_MISSING": "approvers",
+                 "APPROVAL_REFERENCE_MISSING": "approvers.reference",
+                 "ISOLATION_NOT_ATTESTED": "isolated_vm/no_operating_data_or_credentials"}.get(str(exc), "$")
+        raise ApprovalFieldsRejected([(field, str(exc))]) from None
+    except (KeyError, TypeError, ValueError, AttributeError):
+        raise ApprovalFieldsRejected([("$", "APPROVAL_SCHEMA_INVALID")]) from None
+
+
+def _validate_approval(data, *, code, vm, commit, now=None, external_proof=None):
     now = now or datetime.now(timezone.utc)
     require(isinstance(data, dict) and set(data) == {
         "policy_version", "approval_id", "vm_uuid", "commit", "code", "max_uses",
@@ -98,14 +191,24 @@ def validate_approval(data, *, code, vm, commit, now=None):
     approvals = data["approvers"]
     require(isinstance(approvals, list) and len(approvals) == 2, "TWO_APPROVALS_REQUIRED")
     require({a.get("role") for a in approvals} == {"ADMINISTRATOR", "TEST_OWNER"}, "APPROVAL_ROLES_INVALID")
-    require(len({a.get("sid") for a in approvals}) == 2, "DISTINCT_APPROVERS_REQUIRED")
+    owner = next(a for a in approvals if a["role"] == "TEST_OWNER")
+    external = owner.get("method") == "DETACHED_CMS_SHA256"
+    if not external:
+        require(len({a.get("sid") for a in approvals}) == 2, "DISTINCT_APPROVERS_REQUIRED")
     for approval in approvals:
-        require(set(approval) == {"role", "sid", "accepted", "approved_at", "reference"}, "APPROVER_SCHEMA_INVALID")
-        require(isinstance(approval["sid"], str) and re.fullmatch(r"S-1-\d+(?:-\d+)+", approval["sid"]), "APPROVER_SID_INVALID")
+        if approval is owner and external:
+            require(set(approval) == {"role", "method", "accepted", "approved_at", "reference",
+                                     "document_file", "document_sha256", "signature_file"}, "APPROVER_SCHEMA_INVALID")
+        else:
+            require(set(approval) == {"role", "sid", "accepted", "approved_at", "reference"}, "APPROVER_SCHEMA_INVALID")
+            require(isinstance(approval["sid"], str) and re.fullmatch(r"S-1-\d+(?:-\d+)+", approval["sid"]), "APPROVER_SID_INVALID")
         require(approval["accepted"] is True and issued <= utc(approval["approved_at"]) <= now, "RISK_APPROVAL_MISSING")
         require(isinstance(approval["reference"], str) and 0 < len(approval["reference"]) <= 300, "APPROVAL_REFERENCE_MISSING")
         if approval["role"] == "ADMINISTRATOR":
             require(approval["sid"] == vm["sid"], "ADMINISTRATOR_BINDING_MISMATCH")
+    if external:
+        from scripts.lab_owner_signature import verify_owner
+        verify_owner(data, owner, external_proof)
     return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
 
 

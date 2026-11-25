@@ -1,0 +1,20 @@
+{
+  "policy_version": "LAB-E2E-1",
+  "approval_id": "",
+  "vm_uuid": "",
+  "commit": "",
+  "code": "W-07",
+  "max_uses": 1,
+  "issued_at": "",
+  "expires_at": "",
+  "isolated_vm": false,
+  "no_operating_data_or_credentials": false,
+  "risk": "POLICY_OVERDUE_MEANING_UNVERIFIED",
+  "snapshot": {"id": "", "confirmed": false, "recovery_procedure": ""},
+  "approvers": [
+    {"role": "ADMINISTRATOR", "sid": "", "accepted": false, "approved_at": "", "reference": ""},
+    {"role": "TEST_OWNER", "method": "DETACHED_CMS_SHA256", "accepted": false,
+     "approved_at": "", "reference": "", "document_file": "",
+     "document_sha256": "", "signature_file": ""}
+  ]
+}

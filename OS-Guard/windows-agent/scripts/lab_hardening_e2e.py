@@ -28,7 +28,10 @@ def load_record(path):
             check(key not in data, "DUPLICATE_APPROVAL_FIELD")
             data[key] = value
         return data
-    return json.loads(path.read_text(encoding="utf-8-sig"), object_pairs_hook=unique)
+    try:
+        return json.loads(path.read_text(encoding="utf-8-sig"), object_pairs_hook=unique)
+    except (UnicodeError, json.JSONDecodeError):
+        raise policy.ApprovalFieldsRejected([("approval_file", "JSON_INVALID")]) from None
 
 
 def run(approval, digest, revalidate, *, evidence_kind="ISOLATED_VM_LAB"):
@@ -145,17 +148,45 @@ def main(argv=None):
     parser.add_argument("--code", required=True, choices=sorted(e2e.SEMI_AUTO_ALLOWLIST))
     parser.add_argument("--approval-file", required=True, type=Path)
     parser.add_argument("--execute", action="store_true", help="승인 검증·직접 입력·1회 소비 후에만 시험")
+    parser.add_argument("--owner-certificate", type=Path, help="별도 신뢰 경로로 받은 책임자 공개 DER 인증서")
+    parser.add_argument("--owner-cert-sha256", help="책임자 신원과 별도 확인된 인증서 DER SHA256")
+    parser.add_argument("--export-approval-payload", type=Path, help="서명 요청용 정규화 원문만 새 파일로 내보내기; 승인/서명 생성 아님")
     args = parser.parse_args(argv)
     entered = False
     try:
         check(e2e._is_administrator(), "ADMINISTRATOR_REQUIRED")
-        approval = load_record(args.approval_file)
+        try:
+            approval = load_record(args.approval_file)
+        except OSError:
+            raise policy.ApprovalFieldsRejected([("approval_file", "FILE_UNREADABLE_OR_MISSING")]) from None
+        if args.export_approval_payload is not None:
+            check(not args.execute, "EXPORT_CANNOT_EXECUTE")
+            from scripts.lab_owner_signature import payload
+            policy.reject_reparse(args.export_approval_payload)
+            with args.export_approval_payload.open("xb") as stream:
+                stream.write(payload(approval))
+            print("[LAB 서명 요청 원문] 미서명 자료만 내보냄; 승인·환경 PASS·실행 허용 아님")
+            return 0
+        issues = policy.approval_field_issues(approval)
+        if issues:
+            raise policy.ApprovalFieldsRejected(issues)
+        proof = ({"approval_file": args.approval_file.absolute(),
+                  "certificate_file": args.owner_certificate.absolute(),
+                  "certificate_sha256": args.owner_cert_sha256}
+                 if args.owner_certificate is not None and args.owner_cert_sha256 else None)
         def revalidate():
-            digest = policy.validate_approval(approval, code=args.code, vm=policy.identity(), commit=policy.source_commit())
+            arguments = {"code": args.code, "vm": policy.identity(), "commit": policy.source_commit()}
+            if proof is not None:
+                arguments["external_proof"] = proof
+            digest = policy.validate_approval(approval, **arguments)
             policy.environment()
             return digest
         digest = revalidate()
-        print("[LAB 경고] PolicyOverdue 의미 미확정. 승인 기록은 로컬 위험 수용이며 Central/전자서명 승인이 아닙니다.")
+        print("[LAB 경고] PolicyOverdue 의미 미확정. 로컬 위험 수용 시험이며 Central 승인이 아닙니다.")
+        if any(a.get("method") == "DETACHED_CMS_SHA256" for a in approval["approvers"]):
+            print("[LAB 외부 승인] 고정 지문 기반 CMS 검증 완료; 인증서 폐기 상태는 자동 확인하지 않음")
+        else:
+            print("[LAB SID 승인] 현장 승인 기록 방식; 전자서명 검증 아님")
         print("[LAB 경고] VMware 격리·스냅샷 실재는 현장 관리자가 외부에서 확인해야 합니다.")
         print(f"[LAB 범위] VM={approval['vm_uuid']} commit={approval['commit']} "
               f"code={args.code} snapshot={approval['snapshot']['id']}")
@@ -169,6 +200,9 @@ def main(argv=None):
         entered = True
         return run(approval, digest, revalidate)
     except (Exception, KeyboardInterrupt) as exc:
+        if isinstance(exc, policy.ApprovalFieldsRejected):
+            for field, reason in exc.issues:
+                print(f"[LAB 승인 필드] field={field} reason={reason}")
         reason = str(exc) if isinstance(exc, policy.LabRejected) else type(exc).__name__
         if entered:
             print(f"[LAB 실행 오류] {reason}; 추가 시험 금지, 잠금·백업·원복 상태 확인 필요")
