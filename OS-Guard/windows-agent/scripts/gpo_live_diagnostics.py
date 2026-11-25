@@ -9,6 +9,23 @@ from agent.checks.common import NativeWindowsReadOnlyApi
 CHANNEL = "Microsoft-Windows-GroupPolicy/Operational"
 NS = {"e": "http://schemas.microsoft.com/win/2004/08/events/event"}
 STARTS = {4000: 8000, 4002: 8002, 4004: 8004, 4006: 8006}
+# 세션 증명에 실제로 사용하는 역할만 명시한다. 번호 대역과 IsMachine은
+# 세션 경계를 뜻하지 않으며 4117/5351 같은 일반 알림에도 나타날 수 있다.
+SESSION_EVENTS = frozenset({*STARTS, *STARTS.values(), 5117, 5126, 5312, 5313})
+SESSION_EVIDENCE_FIELDS = frozenset({
+    "PolicyActivityId", "GPOInfoList", "NumberOfGPOsDownloaded", "NumberOfGPOsApplicable",
+    "IsDomainJoined", "IsConnectivityFailure", "SessionTimeElapsedInMilliseconds",
+})
+
+
+def session_evidence(row):
+    if row["id"] in SESSION_EVENTS:
+        return True
+    # 미지원 이벤트가 정책 적용/세션 증거 필드를 담으면 일반 알림으로 버리지 않는다.
+    # ActivityID가 있어도 그 이벤트 의미를 지원하기 전에는 안전하게 차단한다.
+    if row["data"].keys() & SESSION_EVIDENCE_FIELDS:
+        fail("GPO_EVENT_ROLE_UNSUPPORTED")
+    return False
 
 
 class LiveDiagnosticError(ValueError):
@@ -115,15 +132,10 @@ def _validate(snapshot, context):
         if row["id"] in {5117, 5126, 5312, 5313} and row["version"] != 0:
             fail("GPO_EVENT_VERSION_UNSUPPORTED")
         context["stage"] = "EVENT_ACTIVITY"
+        required = session_evidence(row)
         correlation = system.find("e:Correlation", NS)
         activity = correlation.get("ActivityID") if correlation is not None else None
         if not activity or not activity.strip():
-            # 시작/종료 계열 및 정책·세션 필드가 있는 이벤트는 상관관계가 필수다.
-            # 알 수 없는 시작/종료 변형도 일반 정보 이벤트로 간주하지 않는다.
-            required = (4000 <= row["id"] < 5000 or 8000 <= row["id"] < 9000
-                        or row["id"] in {5117, 5126, 5312, 5313}
-                        or bool(data.keys() & {"IsMachine", "PolicyActivityId", "GPOInfoList",
-                                             "NumberOfGPOsDownloaded", "NumberOfGPOsApplicable"}))
             if required:
                 fail("GPO_ACTIVITY_MISSING")
             # 6339 등 비세션 이벤트도 버리지 않는다. 위 안전검증과 아래 시간/RecordID

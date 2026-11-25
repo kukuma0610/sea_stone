@@ -58,10 +58,12 @@ class LiveGpoTests(unittest.TestCase):
     def test_vm_6339_without_activity_is_not_session_evidence(self):
         # VM에서 보고된 EventID/RecordID/상관관계 부재만 재현한다.
         # 원본 6339 XML은 아직 없으므로 payload 의미는 가정하지 않는다.
-        for event_id in (6339, 5320):
+        for event_id in (4117, 5324, 5351, 6338, 6339, 5320):
             for correlation in ("", "<Correlation />", '<Correlation ActivityID="" />'):
                 data = snapshot()
-                raw = event(event_id, 1948, {})
+                fields = ({"IsMachine": "true", "WinlogonReturnTimeElapsedInMilliseconds": 12}
+                          if event_id == 5351 else {})
+                raw = event(event_id, 1948, fields)
                 data["events"].append(raw.replace(f'<Correlation ActivityID="{ACTIVITY}" />', correlation))
                 data.update(before_record=1948, after_record=1948)
                 with self.subTest(event_id=event_id, correlation=correlation):
@@ -92,14 +94,40 @@ class LiveGpoTests(unittest.TestCase):
                 live.validate(data)
 
     def test_uncorrelated_policy_fields_cannot_be_treated_as_general_event(self):
-        for fields in ({"IsMachine": "true"}, {"GPOInfoList": "GPO"},
+        for fields in ({"GPOInfoList": "GPO"},
                        {"NumberOfGPOsApplicable": 1}, {"PolicyActivityId": ACTIVITY}):
             data = snapshot()
             data["events"].append(event(6339, 1948, fields, activity=""))
             data.update(before_record=1948, after_record=1948)
             with self.subTest(fields=fields), self.assertRaises(live.LiveDiagnosticError) as caught:
                 live.validate(data)
-            self.assertEqual(caught.exception.reason_code, "GPO_ACTIVITY_MISSING")
+            self.assertEqual(caught.exception.reason_code, "GPO_EVENT_ROLE_UNSUPPORTED")
+
+    def test_unknown_policy_evidence_is_rejected_even_with_activity(self):
+        for activity in (ACTIVITY, ""):
+            for fields in ({"NumberOfGPOsApplicable": 0}, {"IsDomainJoined": "false"},
+                           {"SessionTimeElapsedInMilliseconds": 1}):
+                data = snapshot()
+                data["events"].append(event(9999, 1948, fields, activity=activity))
+                data.update(before_record=1948, after_record=1948)
+                with self.subTest(activity=activity, fields=fields), self.assertRaises(live.LiveDiagnosticError) as caught:
+                    live.validate(data)
+                self.assertEqual(caught.exception.reason_code, "GPO_EVENT_ROLE_UNSUPPORTED")
+
+    def test_general_is_machine_does_not_assert_session_or_hide_errors(self):
+        for event_id in (4117, 5324, 5351, 6338, 6339):
+            for fields, level in (({"IsMachine": "1"}, 4),
+                                  ({"IsMachine": "1", "ErrorCode": 5}, 4),
+                                  ({"IsMachine": "1"}, 3)):
+                data = snapshot()
+                data["events"].append(event(event_id, 1948, fields, activity="", level=level))
+                data.update(before_record=1948, after_record=1948)
+                with self.subTest(event_id=event_id, fields=fields, level=level):
+                    if level == 4 and "ErrorCode" not in fields:
+                        self.assertEqual(live.validate(data)["session_count"], 1)
+                    else:
+                        with self.assertRaises(live.LiveDiagnosticError):
+                            live.validate(data)
 
     def test_general_event_cannot_complete_missing_or_followup_session(self):
         for remove_end in (True, False):
