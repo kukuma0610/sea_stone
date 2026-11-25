@@ -103,19 +103,9 @@ def _validate(snapshot, context):
                "record": context["record_id"],
                "time": date(system.find("e:TimeCreated", NS).get("SystemTime")),
                "level": int(system.findtext("e:Level", namespaces=NS)), "data": data}
-        context["stage"] = "EVENT_ACTIVITY"
-        correlation = system.find("e:Correlation", NS)
-        activity = correlation.get("ActivityID") if correlation is not None else None
-        if not activity or not activity.strip():
-            # 필수 세션 이벤트는 상관관계 없이는 검증할 수 없다. 다른 정보 이벤트도
-            # 독립 이벤트라는 원문 근거가 없으면 임의로 버리지 않고 차단한다.
-            required = row["id"] in {*STARTS, *STARTS.values(), 5117, 5126, 5312, 5313}
-            fail("GPO_ACTIVITY_MISSING" if required else "GPO_UNCORRELATED_EVENT")
-        try:
-            row["activity"] = str(UUID(activity.strip("{}")))
-        except ValueError:
-            fail("GPO_ACTIVITY_INVALID")
         context["stage"] = "EVENT_SAFETY"
+        if not 1 <= row["id"] <= 65535 or row["record"] <= 0 or row["version"] < 0:
+            fail("GPO_EVENT_IDENTITY_INVALID")
         if not boot <= row["time"] <= observed:
             fail("GPO_EVENT_OUTSIDE_CURRENT_BOOT")
         if row["level"] not in {0, 4, 5}:
@@ -124,6 +114,26 @@ def _validate(snapshot, context):
             fail("GPO_SESSION_FAILED")
         if row["id"] in {5117, 5126, 5312, 5313} and row["version"] != 0:
             fail("GPO_EVENT_VERSION_UNSUPPORTED")
+        context["stage"] = "EVENT_ACTIVITY"
+        correlation = system.find("e:Correlation", NS)
+        activity = correlation.get("ActivityID") if correlation is not None else None
+        if not activity or not activity.strip():
+            # 시작/종료 계열 및 정책·세션 필드가 있는 이벤트는 상관관계가 필수다.
+            # 알 수 없는 시작/종료 변형도 일반 정보 이벤트로 간주하지 않는다.
+            required = (4000 <= row["id"] < 5000 or 8000 <= row["id"] < 9000
+                        or row["id"] in {5117, 5126, 5312, 5313}
+                        or bool(data.keys() & {"IsMachine", "PolicyActivityId", "GPOInfoList",
+                                             "NumberOfGPOsDownloaded", "NumberOfGPOsApplicable"}))
+            if required:
+                fail("GPO_ACTIVITY_MISSING")
+            # 6339 등 비세션 이벤트도 버리지 않는다. 위 안전검증과 아래 시간/RecordID
+            # 검증에는 포함하되 None은 어떤 세션의 증거로도 연결하지 않는다.
+            row["activity"] = None
+        else:
+            try:
+                row["activity"] = str(UUID(activity.strip("{}")))
+            except ValueError:
+                fail("GPO_ACTIVITY_INVALID")
         rows.append(row)
     context.update(stage="SESSION_SELECTION", event_id=None, record_id=None)
     rows.sort(key=lambda row: row["record"])

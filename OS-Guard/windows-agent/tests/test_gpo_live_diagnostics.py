@@ -41,8 +41,7 @@ def snapshot():
 
 class LiveGpoTests(unittest.TestCase):
     def test_missing_activity_is_classified_not_attribute_error(self):
-        for event_id, expected in ((5312, "GPO_ACTIVITY_MISSING"),
-                                   (5320, "GPO_UNCORRELATED_EVENT")):
+        for event_id in (*live.STARTS, *live.STARTS.values(), 5117, 5126, 5312, 5313):
             for correlation in ("", "<Correlation />", '<Correlation ActivityID="" />'):
                 data = snapshot()
                 raw = event(event_id, 19, {"InfoDescription": "secret-not-for-output"})
@@ -51,10 +50,68 @@ class LiveGpoTests(unittest.TestCase):
                 with self.subTest(event_id=event_id, correlation=correlation):
                     with self.assertRaises(live.LiveDiagnosticError) as caught:
                         live.validate(data)
-                    self.assertEqual(caught.exception.reason_code, expected)
+                    self.assertEqual(caught.exception.reason_code, "GPO_ACTIVITY_MISSING")
                     self.assertEqual(caught.exception.diagnostic["event_id"], event_id)
                     self.assertEqual(caught.exception.diagnostic["record_id"], 19)
                     self.assertEqual(caught.exception.diagnostic["stage"], "EVENT_ACTIVITY")
+
+    def test_vm_6339_without_activity_is_not_session_evidence(self):
+        # VM에서 보고된 EventID/RecordID/상관관계 부재만 재현한다.
+        # 원본 6339 XML은 아직 없으므로 payload 의미는 가정하지 않는다.
+        for event_id in (6339, 5320):
+            for correlation in ("", "<Correlation />", '<Correlation ActivityID="" />'):
+                data = snapshot()
+                raw = event(event_id, 1948, {})
+                data["events"].append(raw.replace(f'<Correlation ActivityID="{ACTIVITY}" />', correlation))
+                data.update(before_record=1948, after_record=1948)
+                with self.subTest(event_id=event_id, correlation=correlation):
+                    result = live.validate(data)
+                    self.assertEqual(result["session_count"], 1)
+                    self.assertEqual(result["end_record"], 21)
+                    self.assertEqual(result["activity_id"], ACTIVITY.strip("{}").lower())
+
+    def test_uncorrelated_event_does_not_hide_errors_or_invalid_metadata(self):
+        raw = event(6339, 1948, {"ErrorCode": 0}, activity="")
+        mutations = (
+            ("<Level>4</Level>", "<Level>3</Level>"),
+            ('<Data Name="ErrorCode">0', '<Data Name="ErrorCode">5'),
+            ('<Data Name="ErrorCode">0', '<Data Name="ErrorCode">invalid'),
+            ("2026-10-13T06:00:19Z", "2026-10-12T06:00:19Z"),
+            ("<EventRecordID>1948</EventRecordID>", "<EventRecordID>21</EventRecordID>"),
+            ("<EventRecordID>1948</EventRecordID>", "<EventRecordID>0</EventRecordID>"),
+            ("Microsoft-Windows-GroupPolicy", "Other-Provider"),
+            (live.CHANNEL, "Other-Channel"),
+            ("<EventID>6339</EventID>", "<EventID>0</EventID>"),
+        )
+        for old, new in mutations:
+            data = snapshot()
+            self.assertIn(old, raw)
+            data["events"].append(raw.replace(old, new))
+            data.update(before_record=1948, after_record=1948)
+            with self.subTest(old=old), self.assertRaises(live.LiveDiagnosticError):
+                live.validate(data)
+
+    def test_uncorrelated_policy_fields_cannot_be_treated_as_general_event(self):
+        for fields in ({"IsMachine": "true"}, {"GPOInfoList": "GPO"},
+                       {"NumberOfGPOsApplicable": 1}, {"PolicyActivityId": ACTIVITY}):
+            data = snapshot()
+            data["events"].append(event(6339, 1948, fields, activity=""))
+            data.update(before_record=1948, after_record=1948)
+            with self.subTest(fields=fields), self.assertRaises(live.LiveDiagnosticError) as caught:
+                live.validate(data)
+            self.assertEqual(caught.exception.reason_code, "GPO_ACTIVITY_MISSING")
+
+    def test_general_event_cannot_complete_missing_or_followup_session(self):
+        for remove_end in (True, False):
+            data = snapshot()
+            if remove_end:
+                data["events"].pop(4)
+            else:
+                data["events"].append(event(4002, 22, {"IsMachine": "1"}, version=1))
+            data["events"].append(event(6339, 1948, {}, activity=""))
+            data.update(before_record=1948, after_record=1948)
+            with self.subTest(remove_end=remove_end), self.assertRaises(live.LiveDiagnosticError):
+                live.validate(data)
 
     def test_invalid_activity_and_parser_exception_have_safe_context(self):
         for old, new, reason, stage, kind in (
