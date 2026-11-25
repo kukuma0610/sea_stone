@@ -1,0 +1,181 @@
+"""LAB-E2E-1 격리 VM 단일 시험. 운영 진입점과 별개이며 기본은 승인·환경 검증만 수행한다."""
+
+import argparse
+from dataclasses import asdict
+from datetime import datetime, timezone
+import json
+import os
+from pathlib import Path
+import sys
+from uuid import uuid4
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from scripts import lab_hardening_policy as policy
+from scripts import test_hardening_e2e as e2e
+
+
+def check(condition, reason):
+    policy.require(condition, reason)
+
+
+def load_record(path):
+    policy.reject_reparse(path)
+    check(path.stat().st_size <= 32768, "APPROVAL_FILE_TOO_LARGE")
+    def unique(pairs):
+        data = {}
+        for key, value in pairs:
+            check(key not in data, "DUPLICATE_APPROVAL_FIELD")
+            data[key] = value
+        return data
+    return json.loads(path.read_text(encoding="utf-8-sig"), object_pairs_hook=unique)
+
+
+def run(approval, digest, revalidate, *, evidence_kind="ISOLATED_VM_LAB"):
+    check(evidence_kind in {"ISOLATED_VM_LAB", "MOCK_UNIT_TEST"}, "EVIDENCE_KIND_INVALID")
+    code = approval["code"]
+    lease = policy.Lease(approval, digest)
+    lease.acquire()  # 다른 항목 실행 중·승인 재사용·복구 미확인 상태이면 변경 전에 거부한다.
+    report = {"policy": "LAB-E2E-1", "risk": policy.RISK, "approval_id": approval["approval_id"],
+              "approval_sha256": digest, "vm_uuid": approval["vm_uuid"], "commit": approval["commit"],
+              "code": code, "snapshot_id": approval["snapshot"]["id"], "test_policy_used": True,
+              "central_approved": False, "execution_kind": evidence_kind,
+              "started_at": datetime.now(timezone.utc).isoformat(), "status": "SKIP", "stages": {}}
+    changed = False
+    restored = False
+    rollback_failed = False
+    original = original_snapshot = action = None
+    try:
+        revalidate()
+        action = e2e.get_action(code)
+        original_check = e2e.collect_check(code)
+        if code == "W-28" and original_check.current_value.get("service_running") is False:
+            raise policy.LabRejected("RDP_NOT_RUNNING")
+        original = action.capture()
+        policy.reject_reparse(lease.folder / "originals")
+        originals = e2e.SnapshotStore(lease.folder / "originals")
+        save = originals.create_transaction if isinstance(action, e2e.PolicyTransactionAction) else originals.create
+        saved = save(code=code, plan_id="lab-" + approval["approval_id"], path=action.path,
+                     value_name=action.name, captured=original)
+        original_snapshot = originals.load(saved.snapshot_id)
+        check(e2e.expected_setting(original_snapshot) == original, "ORIGINAL_BACKUP_MISMATCH")
+        report["original_snapshot_id"] = saved.snapshot_id
+        report["stages"]["backup"] = "PASS"
+        print("[LAB] 원본 백업 재로드 검증 PASS")
+        check(input(f"FAIL 준비 승인: PREPARE {code} 입력: ").strip() == f"PREPARE {code}", "PREPARATION_NOT_APPROVED")
+        revalidate()
+        check(action.capture() == original, "SETTING_CHANGED_BEFORE_PREPARE")
+        changed = True  # 부분 변경 예외도 반드시 원본 복구 대상으로 취급한다.
+        report["status"] = "FAIL"
+        e2e.prepare_fail(action, original)
+        observed = e2e.collect_check(code)
+        check(observed.status == "FAIL", "PREPARED_CHECK_NOT_FAIL")
+        prepared = action.capture()
+        report["stages"]["fail_preparation"] = "PASS"
+        print("[LAB] FAIL 준비 및 동일 CHECK FAIL 확인")
+        plan = e2e.create_plan(observed)
+        gate = e2e.ApprovalGate()
+        waiting = gate.request(plan)
+        check(input(f"하드닝 승인: APPROVE {code} 입력: ").strip() == f"APPROVE {code}", "HARDENING_NOT_APPROVED")
+        revalidate()
+        approved, receipt = gate.approve(waiting, approved=True)
+        policy.reject_reparse(lease.folder / "hardening-snapshots")
+        store = e2e.SnapshotStore(lease.folder / "hardening-snapshots")
+        runner = e2e.HardeningRunner(gate, snapshot_store=store)
+        result = runner.run(approved, receipt)
+        rollback_failed = result.rollback is not None and not result.rollback.success
+        check(result.state is e2e.HardeningState.SUCCESS, "HARDENING_FAILED")
+        check(e2e.collect_check(code).status == "PASS", "RECHECK_NOT_PASS")
+        snapshot = store.load(result.snapshot_id)
+        check(snapshot.code == code and snapshot.plan_id == plan.plan_id
+              and e2e.expected_setting(snapshot) == prepared
+              and result.before["setting"] == prepared
+              and result.after["setting"] == action.capture()
+              and result.before["check"]["status"] == "FAIL"
+              and result.after["check"]["status"] == "PASS"
+              and result.changed and result.pass_transition, "HARDENING_EVIDENCE_MISMATCH")
+        report.update(plan_id=plan.plan_id, hardening_snapshot_id=result.snapshot_id)
+        report["stages"].update(hardening="PASS", recheck="PASS", before_after_snapshot="PASS")
+        print("[LAB] Hardening/재CHECK PASS 및 Before/After/Snapshot 일치")
+        rollback = runner.rollback(code=code, snapshot_id=result.snapshot_id, plan_id=plan.plan_id)
+        rollback_failed = not rollback.success or rollback.restored_setting != prepared
+        check(rollback.success and rollback.restored_setting == prepared, "ROLLBACK_FAILED")
+        rollback_failed = e2e.collect_check(code).status != "FAIL"
+        check(not rollback_failed, "ROLLBACK_CHECK_NOT_FAIL")
+        report["stages"]["rollback"] = "PASS"
+        report["status"] = "PASS"
+        print("[LAB] Rollback 및 준비했던 FAIL 상태 확인 PASS")
+    except (Exception, KeyboardInterrupt) as exc:
+        # 원문 예외/레지스트리 값/계정명은 증적이나 콘솔에 복사하지 않는다.
+        report["status"] = "FAIL" if changed else "SKIP"
+        report["reason_code"] = str(exc) if isinstance(exc, policy.LabRejected) else type(exc).__name__
+        print(f"[LAB 중단] {report['reason_code']}")
+    finally:
+        if changed and original_snapshot is not None:
+            try:
+                check(e2e._is_administrator(), "RESTORE_ADMINISTRATOR_REQUIRED")
+                saved = originals.load(original_snapshot.snapshot_id)
+                check(saved.code == code and saved.registry_path == action.path and saved.value_name == action.name
+                      and e2e.expected_setting(saved) == original, "ORIGINAL_IDENTITY_MISMATCH")
+                action.restore(asdict(saved))
+                check(action.capture() == original, "ORIGINAL_SETTINGS_NOT_RESTORED")
+                check(e2e.collect_check(code).status == original_check.status, "ORIGINAL_CHECK_NOT_RESTORED")
+                restored = True
+                report["stages"]["original_restore"] = "PASS"
+                print("[LAB] 최종 원본 값·타입·존재 여부 및 CHECK 상태 복구 PASS")
+            except (Exception, KeyboardInterrupt):
+                report.update(status="FAIL", reason_code="ORIGINAL_RESTORE_FAILED")
+                report["stages"]["original_restore"] = "FAIL"
+                print("[LAB 복구 실패] 전체 시험 중단. 잠금·백업 보존, 하이퍼바이저 복구 필요")
+        report["finished_at"] = datetime.now(timezone.utc).isoformat()
+        report["recovery_required"] = (changed and not restored) or rollback_failed
+        path = lease.folder / (str(uuid4()) + ".result.json")
+        with path.open("x", encoding="utf-8") as stream:
+            json.dump(report, stream, ensure_ascii=False, indent=2)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if not report["recovery_required"]:
+            lease.release()
+        print(f"[LAB 결과] {report['status']}; {path}")
+    return 0 if report["status"] == "PASS" else 1
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="격리 VM 위험 수용 시험; 운영 안전 정책은 변경하지 않음")
+    parser.add_argument("--code", required=True, choices=sorted(e2e.SEMI_AUTO_ALLOWLIST))
+    parser.add_argument("--approval-file", required=True, type=Path)
+    parser.add_argument("--execute", action="store_true", help="승인 검증·직접 입력·1회 소비 후에만 시험")
+    args = parser.parse_args(argv)
+    entered = False
+    try:
+        check(e2e._is_administrator(), "ADMINISTRATOR_REQUIRED")
+        approval = load_record(args.approval_file)
+        def revalidate():
+            digest = policy.validate_approval(approval, code=args.code, vm=policy.identity(), commit=policy.source_commit())
+            policy.environment()
+            return digest
+        digest = revalidate()
+        print("[LAB 경고] PolicyOverdue 의미 미확정. 승인 기록은 로컬 위험 수용이며 Central/전자서명 승인이 아닙니다.")
+        print("[LAB 경고] VMware 격리·스냅샷 실재는 현장 관리자가 외부에서 확인해야 합니다.")
+        print(f"[LAB 범위] VM={approval['vm_uuid']} commit={approval['commit']} "
+              f"code={args.code} snapshot={approval['snapshot']['id']}")
+        if not args.execute:
+            print("[LAB 검증] 승인 형식·범위·독립 환경 조건 확인; 미소비, 설정 변경 없음")
+            return 0
+        phrase = f"RISK_ACCEPT {approval['approval_id']} {args.code}"
+        check(input(f"VMware 스냅샷 확인: SNAPSHOT {approval['snapshot']['id']} 입력: ").strip()
+              == f"SNAPSHOT {approval['snapshot']['id']}", "SNAPSHOT_NOT_CONFIRMED")
+        check(input(f"관리자·시험 책임자 승인 문서 확인 후 {phrase} 입력: ").strip() == phrase, "RISK_NOT_CONFIRMED")
+        entered = True
+        return run(approval, digest, revalidate)
+    except (Exception, KeyboardInterrupt) as exc:
+        reason = str(exc) if isinstance(exc, policy.LabRejected) else type(exc).__name__
+        if entered:
+            print(f"[LAB 실행 오류] {reason}; 추가 시험 금지, 잠금·백업·원복 상태 확인 필요")
+        else:
+            print(f"[LAB 거부] {reason}; 하드닝 실행 허용 안 함")
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
