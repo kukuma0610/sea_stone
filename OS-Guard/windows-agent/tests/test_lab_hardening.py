@@ -113,10 +113,11 @@ class LabPolicyTests(unittest.TestCase):
             with self.assertRaises(ValueError): policy.environment()
             operational.assert_not_called()
 
-    def test_state_gpo_list_with_any_value_or_subkey_is_blocked(self):
+    def test_state_gpo_list_policy_values_or_subkeys_are_blocked(self):
         for state in ((1, 0, 0), (0, 1, 0)):
             with patch.object(winreg, "OpenKey"), patch.object(winreg, "QueryInfoKey", side_effect=[(0, 1, 0), state]), \
                     patch.object(winreg, "EnumValue", return_value=("PolicyOverdue", 0, winreg.REG_DWORD)), \
+                    patch.object(policy, "describe_gpo_list"), \
                     self.subTest(state=state), self.assertRaises(policy.LabRejected):
                 policy.exact_history()
 

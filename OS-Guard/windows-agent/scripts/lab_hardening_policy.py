@@ -218,6 +218,57 @@ def _validate_approval(data, *, code, vm, commit, now=None, external_proof=None)
     return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
 
 
+def describe_gpo_list(winreg, key, info, *, depth=0, budget=None):
+    """차단 원인용 제한 진단. 알려지지 않은 문자열/바이너리 내용은 출력하지 않는다."""
+    budget = budget if budget is not None else [64]
+    subkeys, values, _ = info
+    print(f"[LAB GPO-List] depth={depth} subkeys={subkeys} values={values}; 적용 GPO 수가 아닌 Registry 객체 수")
+    for index in range(min(values, max(0, budget[0]))):
+        budget[0] -= 1
+        name, value, kind = winreg.EnumValue(key, index)
+        label = name if re.fullmatch(r"[A-Za-z0-9_-]{0,64}", name) else "[MASKED_NAME]"
+        safe_text = isinstance(value, str) and value in {"", "Local", "LocalGPO", "Local Group Policy"}
+        safe_number = (type(value) is int and name.casefold() in {
+            "version", "options", "enabled", "accessdenied", "gpolink", "nooverride", "flags", "filterallowed"})
+        display = value if safe_text or safe_number else "[MASKED]"
+        type_name = {winreg.REG_SZ: "REG_SZ", winreg.REG_DWORD: "REG_DWORD",
+                     winreg.REG_EXPAND_SZ: "REG_EXPAND_SZ", winreg.REG_MULTI_SZ: "REG_MULTI_SZ"}.get(kind, str(kind))
+        print(f"[LAB GPO-List value] name={label!r} type={type_name} data={display!r}")
+    for index in range(min(subkeys, max(0, budget[0]))):
+        budget[0] -= 1
+        name = winreg.EnumKey(key, index)
+        label = name if re.fullmatch(r"[0-9]{1,4}|\{?[0-9a-fA-F-]{36}\}?", name) else "[MASKED_KEY]"
+        print(f"[LAB GPO-List key] name={label!r}; 객체 존재만으로 적용/미적용을 판정하지 않음")
+        if depth < 2 and budget[0] > 0:
+            with winreg.OpenKey(key, name, 0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as child:
+                describe_gpo_list(winreg, child, winreg.QueryInfoKey(child), depth=depth+1, budget=budget)
+
+
+def verify_gpo_list_state(winreg, state):
+    # OpenKey의 부재와 열거 중 삭제/조회 실패를 구분한다. 후자는 허용하지 않는다.
+    try:
+        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, state, 0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY)
+    except FileNotFoundError:
+        print("[LAB GPO-List] key absent")
+        return
+    with key:
+        before = winreg.QueryInfoKey(key)
+        subkeys, values, _ = before
+        empty = subkeys == 0 and values == 0
+        # 기존 운영용 verify_no_policy_history()와 동일한 '빈 기본값' 의미만 허용한다.
+        # LocalGPO 하위 객체, 이름 있는 값, DWORD 0 등을 자동 미적용으로 해석하지 않는다.
+        empty_default = (subkeys == 0 and values == 1
+                         and winreg.EnumValue(key, 0) == ("", "", winreg.REG_SZ))
+        if not (empty or empty_default):
+            try:
+                describe_gpo_list(winreg, key, before)
+            except Exception as exc:
+                print(f"[LAB GPO-List] diagnostic failed: {type(exc).__name__}; 차단 유지")
+            raise LabRejected("LAB_GPO_LIST_NOT_EMPTY")
+        require(winreg.QueryInfoKey(key) == before, "LAB_GPO_LIST_CHANGED_DURING_QUERY")
+        print(f"[LAB GPO-List] verified empty; empty_default={empty_default}; 실제 적용 여부는 별도 라이브/RSOP/파일 검사")
+
+
 def exact_history():
     import winreg
     history = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\History"
@@ -228,12 +279,7 @@ def exact_history():
         name, value, kind = winreg.EnumValue(key, 0)
         require(name == "PolicyOverdue" and kind == winreg.REG_DWORD and type(value) is int and value == 0,
                 "LAB_HISTORY_VALUE_CHANGED")
-    try:
-        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, state, 0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as key:
-            subkeys, values, _ = winreg.QueryInfoKey(key)
-            require(subkeys == 0 and values == 0, "LAB_GPO_LIST_NOT_EMPTY")
-    except FileNotFoundError:
-        pass
+    verify_gpo_list_state(winreg, state)
 
 
 def environment():
@@ -245,10 +291,12 @@ def environment():
         require(exc.reason_code == "POLICY_HISTORY_FOUND" and
                 getattr(exc, "history_detail", None) == "POLICY_OVERDUE_SEMANTICS_UNVERIFIED",
                 "NON_EXEMPT_ENVIRONMENT_FAILURE")
+        print("[LAB 환경] 운영 POLICY_HISTORY_FOUND 유지; 제한 시험 후보의 별도 GPO-List 검증 진행")
     else:
         raise LabRejected("LAB_EXCEPTION_NOT_APPLICABLE")
     # 기존 검사가 첫 History 경로에서 중단했으므로 두 번째 경로까지 독립 재확인한다.
     exact_history()
+    print("[LAB 환경] 제한 시험 환경 조건 확인; 승인 등록/실행 허용은 별도 검증")
 
 
 class Lease:
