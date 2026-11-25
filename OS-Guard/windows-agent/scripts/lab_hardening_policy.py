@@ -209,6 +209,12 @@ def _validate_approval(data, *, code, vm, commit, now=None, external_proof=None)
     if external:
         from scripts.lab_owner_signature import verify_owner
         verify_owner(data, owner, external_proof)
+    elif any(a["reference"].startswith("windows-logon-v1:") for a in approvals):
+        from scripts.lab_approval_registration import verify_registration
+        try:
+            verify_registration(data)
+        except Exception:
+            raise LabRejected("WINDOWS_LOGON_REGISTRATION_INVALID") from None
     return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
 
 
