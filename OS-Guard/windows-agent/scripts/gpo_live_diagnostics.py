@@ -271,6 +271,9 @@ def event_inventory(snapshot):
                     scopes[activity] = role
             entries.append({"event_id": eid, "version": version, "level": level,
                             "record_id": record, "activity_present": bool(activity.strip()),
+                            "is_machine": (fields.get("IsMachine") in {"1", "true"}
+                                           if fields.get("IsMachine") in {"0", "1", "false", "true"}
+                                           else None),
                             "fields": sorted(k for k in fields if k), "role": role,
                             "reason_code": reason, "_activity": activity})
         except (LiveDiagnosticError, AttributeError, TypeError, ValueError, ET.ParseError) as exc:

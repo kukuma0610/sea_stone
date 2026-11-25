@@ -60,6 +60,58 @@ def with_user_session(start=4001, version=1):
 
 
 class LiveGpoTests(unittest.TestCase):
+    def test_reported_49_events_22_ids_are_not_classified_by_id_ranges(self):
+        # ID/개수와 이미 제공된 필드만 재현한다. 미제공 원본 XML을 대신하지 않는다.
+        counts = {4000: 1, 4001: 1, 4115: 1, 4116: 1, 4117: 2, 4126: 2,
+                  5116: 1, 5117: 2, 5126: 2, 5257: 2, 5311: 2, 5312: 2,
+                  5313: 2, 5320: 9, 5321: 1, 5324: 5, 5340: 2, 5351: 4,
+                  6338: 4, 6339: 1, 8000: 1, 8001: 1}
+        data = with_user_session()
+        record = 40
+        for eid, count in counts.items():
+            if eid in live.SESSION_EVENTS:
+                continue
+            for _ in range(count):
+                fields = ({"IsMachine": "true", "WinlogonReturnTimeElapsedInMilliseconds": 12}
+                          if eid == 5351 else {})
+                data["events"].append(event(eid, record, fields, activity=""))
+                record += 1
+        data.update(before_record=record-1, after_record=record-1)
+        self.assertEqual(len(data["events"]), 49)
+        inventory = live.event_inventory(data)
+        self.assertEqual({e["event_id"] for e in inventory}, set(counts))
+        for eid, count in counts.items():
+            self.assertEqual(sum(e["count"] for e in inventory if e["event_id"] == eid), count)
+        self.assertTrue(any(e["event_id"] == 5351 and e["is_machine"] is True for e in inventory))
+        self.assertEqual(live.validate(data)["user_session_count"], 1)
+        # 일반 이벤트가 있어도 필요한 정책 증거가 없으면 통과하지 않는다.
+        data["events"].pop(2)
+        with self.assertRaises(live.LiveDiagnosticError): live.validate(data)
+
+    def test_all_computer_user_start_pair_combinations(self):
+        for computer_start in live.STARTS:
+            for user_start in live.USER_STARTS:
+                data = with_user_session(user_start)
+                if computer_start != 4000:
+                    # 부팅 세션은 남기고 그 뒤의 컴퓨터 처리 세션을 추가한다.
+                    extra = snapshot()["events"]
+                    for raw in extra:
+                        node = ET.fromstring(raw)
+                        system = node.find("e:System", live.NS)
+                        eid = system.find("e:EventID", live.NS)
+                        if eid.text == "4000": eid.text = str(computer_start)
+                        if eid.text == "8000": eid.text = str(live.STARTS[computer_start])
+                        rec = system.find("e:EventRecordID", live.NS)
+                        rec.text = str(int(rec.text) + 40)
+                        xml = ET.tostring(node, encoding="unicode").replace(ACTIVITY,
+                            "{22222222-2222-2222-2222-222222222222}")
+                        data["events"].append(xml)
+                    data.update(before_record=61, after_record=61)
+                with self.subTest(computer=computer_start, user=user_start):
+                    result = live.validate(data)
+                    self.assertEqual(result["user_session_count"], 1)
+                    self.assertEqual(result["session_count"], 1 if computer_start == 4000 else 2)
+
     def test_all_user_session_pairs_are_separate_from_computer_evidence(self):
         for start in live.USER_STARTS:
             for version in (0, 1):
