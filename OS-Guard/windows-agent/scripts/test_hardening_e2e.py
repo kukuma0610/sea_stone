@@ -121,6 +121,7 @@ def verify_no_policy_history():
                 subkeys, values, _ = winreg.QueryInfoKey(key)
                 print(f"[환경] 정책 이력 {path}: subkeys={subkeys}, values={values}")
                 meaningful = False
+                block_detail = "UNVERIFIED_OR_APPLIED_POLICY_HISTORY"
                 for index in range(values):
                     name, data, kind = winreg.EnumValue(key, index)
                     # Microsoft 문서상 IsSlowLink는 네트워크 링크 상태 메타데이터이다.
@@ -128,6 +129,12 @@ def verify_no_policy_history():
                                 and kind == winreg.REG_DWORD and type(data) is int and data in (0, 1))
                     empty_default = name == "" and kind == winreg.REG_SZ and data == ""
                     classification = "METADATA" if metadata or empty_default else "HISTORY_OR_UNKNOWN"
+                    if (path.endswith("\\History") and subkeys == 0 and values == 1
+                            and name.casefold() == "policyoverdue" and kind == winreg.REG_DWORD
+                            and type(data) is int and data == 0):
+                        # Microsoft가 설명한 History의 대기시간 계산값과 이 값을 혼동하지 않는다.
+                        # PolicyOverdue의 의미는 공식 확인되지 않았으므로 허용 근거가 아니다.
+                        block_detail = "POLICY_OVERDUE_SEMANTICS_UNVERIFIED"
                     type_name = {winreg.REG_SZ: "REG_SZ", winreg.REG_DWORD: "REG_DWORD",
                                  winreg.REG_EXPAND_SZ: "REG_EXPAND_SZ", winreg.REG_MULTI_SZ: "REG_MULTI_SZ"}.get(kind, str(kind))
                     # 관련 GPO 정보만 출력하며 비밀값으로 의심되는 이름은 데이터를 마스킹한다.
@@ -139,7 +146,11 @@ def verify_no_policy_history():
                 for index in range(subkeys):
                     print(f"[환경] History subkey={winreg.EnumKey(key, index)!r}")
                 if subkeys or meaningful:
-                    raise EnvironmentDiagnosticError("POLICY_HISTORY_FOUND", "POLICY_HISTORY", "policy history is present or cannot be resolved")
+                    print(f"[환경] History 차단 detail={block_detail}; "
+                          "현재 적용 GPO 존재를 확정한 것이 아니라, 이력 또는 미확인 값에 대한 안전 차단")
+                    error = EnvironmentDiagnosticError("POLICY_HISTORY_FOUND", "POLICY_HISTORY", block_detail)
+                    error.history_detail = block_detail
+                    raise error
         except FileNotFoundError:
             print(f"[환경] 정책 이력 {path}: 없음")
 

@@ -130,6 +130,41 @@ class E2EEnvironmentTests(unittest.TestCase):
                 self.assertIn("PolicyOverdue", output.getvalue())
                 self.assertIn("HISTORY_OR_UNKNOWN", output.getvalue())
 
+    def test_exact_policy_overdue_zero_is_unverified_not_confirmed_application(self):
+        with patch.object(winreg, "OpenKey"), patch.object(winreg, "QueryInfoKey", return_value=(0, 1, 0)), \
+                patch.object(winreg, "EnumValue", return_value=("PolicyOverdue", 0, winreg.REG_DWORD)), \
+                redirect_stdout(io.StringIO()) as output, self.assertRaises(script.EnvironmentDiagnosticError) as caught:
+            script.verify_no_policy_history()
+        self.assertEqual(caught.exception.reason_code, "POLICY_HISTORY_FOUND")
+        self.assertEqual(caught.exception.history_detail, "POLICY_OVERDUE_SEMANTICS_UNVERIFIED")
+        self.assertIn("HISTORY_OR_UNKNOWN", output.getvalue())
+        self.assertIn("POLICY_OVERDUE_SEMANTICS_UNVERIFIED", output.getvalue())
+
+    def test_special_diagnostic_does_not_expand_to_other_shapes(self):
+        for subkeys, entries in (
+            (1, [("PolicyOverdue", 0, winreg.REG_DWORD)]),
+            (0, [("PolicyOverdue", 1, winreg.REG_DWORD)]),
+            (0, [("PolicyOverdue", "0", winreg.REG_SZ)]),
+            (0, [("PolicyOverdue", 0, winreg.REG_DWORD), ("Other", 0, winreg.REG_DWORD)])):
+            with self.subTest(entries=entries, subkeys=subkeys), patch.object(winreg, "OpenKey"), \
+                    patch.object(winreg, "QueryInfoKey", return_value=(subkeys, len(entries), 0)), \
+                    patch.object(winreg, "EnumValue", side_effect=entries), \
+                    patch.object(winreg, "EnumKey", return_value="{policy-guid}"), \
+                    redirect_stdout(io.StringIO()), self.assertRaises(script.EnvironmentDiagnosticError) as caught:
+                script.verify_no_policy_history()
+            self.assertEqual(caught.exception.reason_code, "POLICY_HISTORY_FOUND")
+            self.assertEqual(caught.exception.history_detail, "UNVERIFIED_OR_APPLIED_POLICY_HISTORY")
+
+    def test_machine_gpo_list_policy_overdue_is_not_classified_as_history_metadata(self):
+        with patch.object(winreg, "OpenKey") as opened, \
+                patch.object(winreg, "QueryInfoKey", return_value=(0, 1, 0)), \
+                patch.object(winreg, "EnumValue", return_value=("PolicyOverdue", 0, winreg.REG_DWORD)), \
+                redirect_stdout(io.StringIO()), self.assertRaises(script.EnvironmentDiagnosticError) as caught:
+            opened.side_effect = [FileNotFoundError(), opened.return_value]
+            script.verify_no_policy_history()
+        self.assertEqual(caught.exception.reason_code, "POLICY_HISTORY_FOUND")
+        self.assertEqual(caught.exception.history_detail, "UNVERIFIED_OR_APPLIED_POLICY_HISTORY")
+
     def test_policy_overdue_additional_values_subkeys_and_read_failure_blocked(self):
         for subkeys, entries in ((0, [("PolicyOverdue", 0, winreg.REG_DWORD), ("IsSlowLink", 0, winreg.REG_DWORD)]), (1, [("PolicyOverdue", 0, winreg.REG_DWORD)])):
             with self.subTest(subkeys=subkeys), patch.object(winreg, "OpenKey"), patch.object(winreg, "QueryInfoKey", return_value=(subkeys, len(entries), 0)), patch.object(winreg, "EnumValue", side_effect=entries), patch.object(winreg, "EnumKey", return_value="{domain-gpo-guid}"), redirect_stdout(io.StringIO()), self.assertRaises(script.EnvironmentDiagnosticError):
